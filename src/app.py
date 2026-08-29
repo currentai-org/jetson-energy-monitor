@@ -117,14 +117,16 @@ class EnergyApp(App):
         background: $panel;
     }
     .spark-row {
-        height: 1;
+        height: 3;
         margin: 0 1;
     }
     .spark-label {
         width: 16;
+        content-align: left top;
     }
     Sparkline {
         width: 1fr;
+        height: 3;
     }
     #spark-current > .sparkline--max-color {
         color: yellow;
