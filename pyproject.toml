@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "jetson-stats==4.3.2",
     "plotext<6",
     "smbus2>=0.6.1",
     "textual>=8.2.8",

@@ -3,10 +3,20 @@ revision = 3
 requires-python = ">=3.10"
 
 [[package]]
+name = "distro"
+version = "1.9.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/fc/f8/98eea607f65de6527f8a2e8885fc8015d3e6f5775df186e443e0964a11c3/distro-1.9.0.tar.gz", hash = "sha256:2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed", size = 60722, upload-time = "2023-12-24T09:54:32.31Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/12/b3/231ffd4ab1fc9d679809f356cebee130ac7daa00d6d6f3206dd4fd137e9e/distro-1.9.0-py3-none-any.whl", hash = "sha256:7bffd925d65168f85027d8da9af6bddab658135b840670a223589bc0c8ef02b2", size = 20277, upload-time = "2023-12-24T09:54:30.421Z" },
+]
+
+[[package]]
 name = "jetson-energy-usage"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "jetson-stats" },
     { name = "plotext" },
     { name = "smbus2" },
     { name = "textual" },
@@ -15,11 +25,22 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "jetson-stats", specifier = "==4.3.2" },
     { name = "plotext", specifier = "<6" },
     { name = "smbus2", specifier = ">=0.6.1" },
     { name = "textual", specifier = ">=8.2.8" },
     { name = "textual-plotext", specifier = ">=1.0.1" },
 ]
+
+[[package]]
+name = "jetson-stats"
+version = "4.3.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "distro" },
+    { name = "smbus2" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a8/c1/0b24527991f60379a6ae270b772d0fb05f680e4607e3246862b27b2e8e2c/jetson-stats-4.3.2.tar.gz", hash = "sha256:2b033cb02b9d4cf70d13cdb915b5cf58b864a742d612704513e196943dc0a397", size = 118734, upload-time = "2025-03-19T14:48:41.577Z" }
 
 [[package]]
 name = "linkify-it-py"

@@ -58,9 +58,18 @@ behavior after this tool exits.
   I2C address) so runs can be compared/audited later. Built via
   `tests._log_result_jsonl()`, called from both `run_baseline_test` and
   `EnergyCapture.stop`.
-- **`src/app.py`** — the Textual TUI: live current chart (last 15s), status
-  bar (latest reading, achieved sample rate, jitter), scrolling test-result
-  log, and keybindings.
+- **`src/app.py`** — the Textual TUI: live current chart (last 15s) plus a
+  CPU/GPU load chart (last 60s) side by side, a status bar (latest reading,
+  achieved sample rate, jitter), a system-resource status bar (CPU, GPU,
+  RAM, swap, fan, die temperature), a scrolling test-result log, and
+  keybindings.
+- **`src/sysinfo.py`** — background thread polling `jetson-stats` (jtop) at
+  2 Hz for CPU load (aggregate + per-core), GPU load, RAM/swap usage, fan
+  RPM/duty, and die temperature (thermal-junction zone). Runs independently
+  of the INA3221 sampler so a slow/stalled jtop connection can never add
+  jitter to current sampling. Degrades gracefully (`SysSnapshot(ok=False)`)
+  if the jtop service isn't reachable or the client library version
+  mismatches the running service.
 
 ## Keybindings
 
@@ -97,6 +106,15 @@ groups   # should list "i2c"
 
 ## Hardware notes
 
+- **jetson-stats version pinning:** this project pins `jetson-stats==4.3.2`
+  in `pyproject.toml` to match the `jtop` *system service* version already
+  running on `pocket-infer-6a8f` (from L4T's default install). jtop's
+  client/service protocol is version-checked and refuses to connect on a
+  mismatch. If you see `Mismatch version jtop service: [X] and client: [Y]`,
+  either pin the client version to match (`uv add jetson-stats==X`) or run
+  `sudo jtop --install-service` to upgrade the service to match the client
+  (the latter needs sudo and affects other users of the shared device --
+  prefer pinning the client).
 - Shunt resistor value assumed: **5 mΩ** (`shunt1_resistor` sysfs attribute
   read back as 5000 µΩ on the reference device) — matches TI reference
   design constant used by the kernel driver. If porting to a different
