@@ -29,6 +29,7 @@ Architecture:
 """
 from __future__ import annotations
 
+import argparse
 import time
 from collections import deque
 
@@ -128,12 +129,17 @@ class EnergyApp(App):
 
     mode = reactive("idle")
 
-    def __init__(self, channel: int = 1, target_hz: float = 1000.0):
+    def __init__(
+        self,
+        channel: int = 1,
+        target_hz: float = 1000.0,
+        sys_poll_hz: float = SYS_POLL_HZ,
+    ):
         super().__init__()
         self.dev = INA3221()
         self.dev.configure_fast_single_channel(channel=channel)
         self.sampler = Sampler(self.dev, channel=channel, target_hz=target_hz)
-        self.sysmon = SysMonitor(poll_hz=SYS_POLL_HZ)
+        self.sysmon = SysMonitor(poll_hz=sys_poll_hz)
         self.energy = EnergyCapture(self.sampler, self.dev, sysmon=self.sysmon)
         self._chart_t: deque[float] = deque()
         self._chart_ma: deque[float] = deque()
@@ -314,7 +320,42 @@ class EnergyApp(App):
 
 
 def main() -> None:
-    app = EnergyApp()
+    parser = argparse.ArgumentParser(
+        prog="jetson-energy-usage",
+        description="TUI for running energy-efficiency tests on the Jetson Orin Nano "
+        "via its onboard INA3221 current monitor, with live system resource context.",
+    )
+    parser.add_argument(
+        "--sample-hz",
+        type=float,
+        default=1000.0,
+        metavar="HZ",
+        help="Target INA3221 current sampling rate in Hz (default: %(default)s). "
+        "Measured achievable rate on pocket-infer-6a8f is ~1600 Hz single-channel; "
+        "requesting higher than the hardware/I2C bus can sustain will show up as "
+        "reduced 'Rate' and increased jitter in the status bar.",
+    )
+    parser.add_argument(
+        "--sysinfo-hz",
+        type=float,
+        default=SYS_POLL_HZ,
+        metavar="HZ",
+        help="Poll rate in Hz for system resource stats (CPU/GPU/RAM/swap/fan/temp) "
+        "via jetson-stats (jtop) (default: %(default)s). jtop's own service "
+        "publishes at roughly 1 Hz internally, so requesting much faster than "
+        "that will not increase real data resolution, only add polling overhead.",
+    )
+    parser.add_argument(
+        "--channel",
+        type=int,
+        default=1,
+        choices=[1, 2, 3],
+        help="INA3221 channel to sample (1=VDD_IN total board power, "
+        "2=VDD_CPU_GPU_CV, 3=VDD_SOC). Default: %(default)s.",
+    )
+    args = parser.parse_args()
+
+    app = EnergyApp(channel=args.channel, target_hz=args.sample_hz, sys_poll_hz=args.sysinfo_hz)
     app.run()
 
 

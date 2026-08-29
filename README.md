@@ -107,6 +107,27 @@ pip install -r requirements.txt
 python src/app.py
 ```
 
+### Command-line flags
+
+```
+usage: jetson-energy-usage [-h] [--sample-hz HZ] [--sysinfo-hz HZ] [--channel {1,2,3}]
+
+  --sample-hz HZ     Target INA3221 current sampling rate in Hz (default: 1000).
+                      Measured achievable rate on pocket-infer-6a8f is ~1600 Hz
+                      single-channel; requesting higher than the hardware/I2C bus
+                      can sustain shows up as reduced 'Rate' and increased jitter
+                      in the status bar rather than an error.
+  --sysinfo-hz HZ     Poll rate in Hz for CPU/GPU/RAM/swap/fan/temp via jetson-stats
+                      (jtop) (default: 2). jtop's own service publishes at roughly
+                      1 Hz internally, so requesting much faster than that adds
+                      polling overhead without more real data resolution.
+  --channel {1,2,3}   INA3221 channel to sample (1=VDD_IN total board power,
+                      2=VDD_CPU_GPU_CV, 3=VDD_SOC). Default: 1.
+```
+
+Example: `uv run python src/app.py --sample-hz 500 --sysinfo-hz 1` for a
+lower-overhead run.
+
 No `sudo` needed as long as your user is in the `i2c` group:
 
 ```bash
