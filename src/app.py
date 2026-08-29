@@ -134,6 +134,7 @@ class EnergyApp(App):
         channel: int = 1,
         target_hz: float = 1000.0,
         sys_poll_hz: float = SYS_POLL_HZ,
+        show_plots: bool = True,
     ):
         super().__init__()
         self.dev = INA3221()
@@ -141,6 +142,7 @@ class EnergyApp(App):
         self.sampler = Sampler(self.dev, channel=channel, target_hz=target_hz)
         self.sysmon = SysMonitor(poll_hz=sys_poll_hz)
         self.energy = EnergyCapture(self.sampler, self.dev, sysmon=self.sysmon)
+        self.show_plots = show_plots
         self._chart_t: deque[float] = deque()
         self._chart_ma: deque[float] = deque()
         self._sys_t: deque[float] = deque()
@@ -155,9 +157,10 @@ class EnergyApp(App):
         yield Header(show_clock=True)
         yield StatusPanel(id="status")
         yield SysPanel(id="sysstatus")
-        with Horizontal(id="charts"):
-            yield PlotextPlot(id="chart")
-            yield PlotextPlot(id="syschart")
+        if self.show_plots:
+            with Horizontal(id="charts"):
+                yield PlotextPlot(id="chart")
+                yield PlotextPlot(id="syschart")
         yield Log(id="log", highlight=False)
         yield Footer()
 
@@ -170,6 +173,8 @@ class EnergyApp(App):
             "Press 'b' for a 10s baseline test, 'e' then space to start/stop an "
             "energy capture, 'q' to quit."
         )
+        if not self.show_plots:
+            self.log_widget.write_line("Live plots disabled (--no-plots).")
         self.set_interval(1.0 / UI_REFRESH_HZ, self._tick)
 
     def on_unmount(self) -> None:
@@ -181,17 +186,21 @@ class EnergyApp(App):
     def _tick(self) -> None:
         # Pull recent samples for charting without disturbing the sampler's
         # own buffer bookkeeping used by baseline/energy tests (peek only).
-        recent = self.sampler.peek_recent(int(1000 * CHART_WINDOW_S))
+        # Skipped entirely when plots are disabled -- this is the actual
+        # perf win (avoids peek_recent()'s per-sample copy + plotext redraw
+        # cost, not just widget visibility).
         now = time.perf_counter() - self._t0
-        for s in recent:
-            t_rel = s.t - self._t0
-            self._chart_t.append(t_rel)
-            self._chart_ma.append(s.current_ma)
-        # Trim to window
-        cutoff = now - CHART_WINDOW_S
-        while self._chart_t and self._chart_t[0] < cutoff:
-            self._chart_t.popleft()
-            self._chart_ma.popleft()
+        if self.show_plots:
+            recent = self.sampler.peek_recent(int(1000 * CHART_WINDOW_S))
+            for s in recent:
+                t_rel = s.t - self._t0
+                self._chart_t.append(t_rel)
+                self._chart_ma.append(s.current_ma)
+            # Trim to window
+            cutoff = now - CHART_WINDOW_S
+            while self._chart_t and self._chart_t[0] < cutoff:
+                self._chart_t.popleft()
+                self._chart_ma.popleft()
 
         # If an energy capture is active, keep draining into it so the
         # sampler's bounded buffer never overflows on a long capture.
@@ -218,7 +227,7 @@ class EnergyApp(App):
         sys_snap = self.sysmon.latest
         sysstatus = self.query_one("#sysstatus", SysPanel)
         sysstatus.update(sysstatus.render_sys(sys_snap))
-        if sys_snap.ok and sys_snap.t > self._last_sys_t_seen:
+        if self.show_plots and sys_snap.ok and sys_snap.t > self._last_sys_t_seen:
             self._last_sys_t_seen = sys_snap.t
             t_rel = now  # align on the same relative timebase as the current chart
             self._sys_t.append(t_rel)
@@ -230,8 +239,9 @@ class EnergyApp(App):
                 self._sys_cpu.popleft()
                 self._sys_gpu.popleft()
 
-        self._redraw_chart()
-        self._redraw_sys_chart()
+        if self.show_plots:
+            self._redraw_chart()
+            self._redraw_sys_chart()
 
     def dev_last_voltage(self) -> float | None:
         # Cheap enough at UI refresh rate (~12Hz) to read directly; the fast
@@ -311,6 +321,9 @@ class EnergyApp(App):
                 self.log_widget.write_line(line)
 
     def action_reset(self) -> None:
+        if not self.show_plots:
+            self.log_widget.write_line("[!] Plots disabled (--no-plots); nothing to reset.")
+            return
         self._chart_t.clear()
         self._chart_ma.clear()
         self._sys_t.clear()
@@ -353,9 +366,22 @@ def main() -> None:
         help="INA3221 channel to sample (1=VDD_IN total board power, "
         "2=VDD_CPU_GPU_CV, 3=VDD_SOC). Default: %(default)s.",
     )
+    parser.add_argument(
+        "--no-plots",
+        action="store_true",
+        help="Disable the live current and CPU/GPU charts entirely (status bars, "
+        "keybindings, and CSV/JSONL logging are unaffected). Use this if the "
+        "plotext redraws are causing lag/performance issues -- the charts are "
+        "the most render-expensive part of the UI at high refresh rates.",
+    )
     args = parser.parse_args()
 
-    app = EnergyApp(channel=args.channel, target_hz=args.sample_hz, sys_poll_hz=args.sysinfo_hz)
+    app = EnergyApp(
+        channel=args.channel,
+        target_hz=args.sample_hz,
+        sys_poll_hz=args.sysinfo_hz,
+        show_plots=not args.no_plots,
+    )
     app.run()
 
 
