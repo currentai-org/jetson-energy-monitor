@@ -47,6 +47,17 @@ behavior after this tool exits.
   falling back to `~/.cache/jetson-energy-usage`) so runs can be reviewed or
   replotted later. Filenames: `YYYYMMDD_HHMMSS_<baseline|energy>.csv`. The
   written path is echoed in the TUI's result log and in `TestResult.csv_path`.
+- **`src/jsonl_log.py`** — every test run also appends one JSON object (one
+  line) to a single running log, `results.jsonl`, in the same cache
+  directory. One `b` invocation writes exactly one line; one complete `e`
+  start/stop capture writes exactly one line. Different test types can
+  carry different fields (e.g. only the energy test has `mwh`/`mah`; only
+  the baseline test has `requested_duration_s`) -- consumers should key off
+  `test_type` rather than assuming a fixed schema. Each record also carries
+  sampler jitter/rate stats and device config (channel, shunt resistance,
+  I2C address) so runs can be compared/audited later. Built via
+  `tests._log_result_jsonl()`, called from both `run_baseline_test` and
+  `EnergyCapture.stop`.
 - **`src/app.py`** — the Textual TUI: live current chart (last 15s), status
   bar (latest reading, achieved sample rate, jitter), scrolling test-result
   log, and keybindings.
