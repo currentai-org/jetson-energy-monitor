@@ -1,0 +1,19 @@
+[project]
+name = "jetson-energy-usage"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "plotext<6",
+    "smbus2>=0.6.1",
+    "textual>=8.2.8",
+    "textual-plotext>=1.0.1",
+]
+
+[project.scripts]
+jetson-energy-usage = "jetson_energy_usage:main"
+
+[build-system]
+requires = ["uv_build>=0.12.7,<0.13.0"]
+build-backend = "uv_build"
