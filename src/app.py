@@ -12,7 +12,7 @@ Keybindings:
            press SPACE again to stop; result (mWh/mAh) is reported.
   space    Start/stop the energy capture (only while armed, or toggles
            an already-active capture -- see below).
-  r        Reset chart / clear last result.
+  r        Reset the rolling sparkline history.
   q        Quit.
 
 Architecture:
@@ -21,9 +21,21 @@ Architecture:
   - `SysMonitor` (sysinfo.py) runs a second background thread polling jtop
     (default 2 Hz -- jtop's own service publishes at ~1Hz internally, no
     value in polling faster) for CPU/GPU/RAM/swap/fan/temp.
-  - The UI polls both on a lightweight Textual timer (default 10 Hz screen
-    refresh) to update the live charts and readouts -- this refresh rate is
-    independent of and never gates either background sampling rate.
+  - The UI polls both on a lightweight Textual timer (default 5 Hz screen
+    refresh -- deliberately modest; this is a "rough picture" tool, not a
+    scope) to update the sparklines and numeric readouts. This refresh
+    rate is independent of and never gates either background sampling
+    rate.
+  - Live visuals use Textual's built-in `Sparkline` widget (single-row,
+    unicode block-character bars -- the same style jtop/jetson-stats uses
+    in its curses UI) instead of a full plotting library. This was a
+    deliberate downgrade from an earlier plotext-based implementation:
+    plotext's per-frame rendering of thousands of high-resolution data
+    points was pegging a CPU core and the underlying sample buffer peek
+    was silently O(buffer size) instead of O(window size), causing the UI
+    to visibly bog down/hang after ~15s of runtime. Sparkline only ever
+    holds a small fixed-length rolling window (see SPARKLINE_HISTORY) and
+    renders in O(width) terminal cells, not O(data points).
   - Blocking test logic (baseline test's 10s wait) runs in a Textual
     `work`-decorated worker (thread) so the UI stays responsive.
 """
@@ -34,21 +46,18 @@ import time
 from collections import deque
 
 from textual.app import App, ComposeResult
-from textual.containers import Vertical, Horizontal
+from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
-from textual.widgets import Footer, Header, Static, Log
-from textual.worker import Worker, WorkerState
-from textual_plotext import PlotextPlot
+from textual.widgets import Footer, Header, Log, Sparkline, Static
 
 from ina3221 import INA3221
 from sampler import Sampler
 from sysinfo import SysMonitor, SysSnapshot
 from tests import EnergyCapture, TestResult, run_baseline_test
 
-CHART_WINDOW_S = 15.0  # seconds of history shown on the current chart
-SYS_CHART_WINDOW_S = 60.0  # seconds of history shown on the CPU/GPU chart
-UI_REFRESH_HZ = 12.0
+UI_REFRESH_HZ = 5.0  # deliberately modest -- a "rough picture" tool, not a scope
 SYS_POLL_HZ = 2.0
+SPARKLINE_HISTORY = 120  # data points retained per sparkline (~24s at 5Hz refresh)
 
 
 class StatusPanel(Static):
@@ -107,11 +116,24 @@ class EnergyApp(App):
         padding: 1;
         background: $panel;
     }
-    #charts {
-        height: 1fr;
+    .spark-row {
+        height: 1;
+        margin: 0 1;
     }
-    #chart, #syschart {
+    .spark-label {
+        width: 16;
+    }
+    Sparkline {
         width: 1fr;
+    }
+    #spark-current > .sparkline--max-color {
+        color: yellow;
+    }
+    #spark-cpu > .sparkline--max-color {
+        color: cyan;
+    }
+    #spark-gpu > .sparkline--max-color {
+        color: magenta;
     }
     #log {
         height: 10;
@@ -123,7 +145,7 @@ class EnergyApp(App):
         ("b", "run_baseline", "Baseline test (10s)"),
         ("e", "arm_energy", "Arm energy test"),
         ("space", "toggle_energy", "Start/stop capture"),
-        ("r", "reset", "Reset chart"),
+        ("r", "reset", "Reset sparklines"),
         ("q", "quit", "Quit"),
     ]
 
@@ -143,24 +165,26 @@ class EnergyApp(App):
         self.sysmon = SysMonitor(poll_hz=sys_poll_hz)
         self.energy = EnergyCapture(self.sampler, self.dev, sysmon=self.sysmon)
         self.show_plots = show_plots
-        self._chart_t: deque[float] = deque()
-        self._chart_ma: deque[float] = deque()
-        self._sys_t: deque[float] = deque()
-        self._sys_cpu: deque[float] = deque()
-        self._sys_gpu: deque[float] = deque()
-        self._t0 = time.perf_counter()
+        self._hist_current: deque[float] = deque(maxlen=SPARKLINE_HISTORY)
+        self._hist_cpu: deque[float] = deque(maxlen=SPARKLINE_HISTORY)
+        self._hist_gpu: deque[float] = deque(maxlen=SPARKLINE_HISTORY)
         self._baseline_running = False
         self._last_result: TestResult | None = None
-        self._last_sys_t_seen: float = 0.0
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield StatusPanel(id="status")
         yield SysPanel(id="sysstatus")
         if self.show_plots:
-            with Horizontal(id="charts"):
-                yield PlotextPlot(id="chart")
-                yield PlotextPlot(id="syschart")
+            with Horizontal(classes="spark-row"):
+                yield Static("Current (mA):", classes="spark-label")
+                yield Sparkline([], id="spark-current")
+            with Horizontal(classes="spark-row"):
+                yield Static("CPU load (%):", classes="spark-label")
+                yield Sparkline([], id="spark-cpu")
+            with Horizontal(classes="spark-row"):
+                yield Static("GPU load (%):", classes="spark-label")
+                yield Sparkline([], id="spark-gpu")
         yield Log(id="log", highlight=False)
         yield Footer()
 
@@ -174,7 +198,7 @@ class EnergyApp(App):
             "energy capture, 'q' to quit."
         )
         if not self.show_plots:
-            self.log_widget.write_line("Live plots disabled (--no-plots).")
+            self.log_widget.write_line("Live sparklines disabled (--no-plots).")
         self.set_interval(1.0 / UI_REFRESH_HZ, self._tick)
 
     def on_unmount(self) -> None:
@@ -184,23 +208,29 @@ class EnergyApp(App):
         self.dev.close()
 
     def _tick(self) -> None:
-        # Pull recent samples for charting without disturbing the sampler's
-        # own buffer bookkeeping used by baseline/energy tests (peek only).
-        # Skipped entirely when plots are disabled -- this is the actual
-        # perf win (avoids peek_recent()'s per-sample copy + plotext redraw
-        # cost, not just widget visibility).
-        now = time.perf_counter() - self._t0
+        # A test in progress (baseline worker or an active energy capture)
+        # owns the sampler's buffer via its own drain()/poll() calls -- we
+        # must not also drain here, or we'd steal samples out from under
+        # the test and corrupt its results. In that case we only *peek* the
+        # single latest value (O(1), no buffer traversal) so the sparkline
+        # still shows some movement without touching the buffer.
+        testing = self._baseline_running or self.energy.active
         if self.show_plots:
-            recent = self.sampler.peek_recent(int(1000 * CHART_WINDOW_S))
-            for s in recent:
-                t_rel = s.t - self._t0
-                self._chart_t.append(t_rel)
-                self._chart_ma.append(s.current_ma)
-            # Trim to window
-            cutoff = now - CHART_WINDOW_S
-            while self._chart_t and self._chart_t[0] < cutoff:
-                self._chart_t.popleft()
-                self._chart_ma.popleft()
+            if testing:
+                latest = self.sampler.latest
+                if latest is not None:
+                    self._hist_current.append(latest.current_ma)
+            else:
+                # Idle: safe to drain. This also prevents the sample buffer
+                # from silently growing to its 200k-sample cap while no
+                # test is running. One representative value (mean of
+                # whatever accumulated since the last tick, typically ~200
+                # samples at 1kHz/5Hz) keeps this O(samples-per-tick), not
+                # O(sparkline window) or O(buffer size).
+                drained = self.sampler.drain()
+                if drained:
+                    mean_ma = sum(s.current_ma for s in drained) / len(drained)
+                    self._hist_current.append(mean_ma)
 
         # If an energy capture is active, keep draining into it so the
         # sampler's bounded buffer never overflows on a long capture.
@@ -227,53 +257,22 @@ class EnergyApp(App):
         sys_snap = self.sysmon.latest
         sysstatus = self.query_one("#sysstatus", SysPanel)
         sysstatus.update(sysstatus.render_sys(sys_snap))
-        if self.show_plots and sys_snap.ok and sys_snap.t > self._last_sys_t_seen:
-            self._last_sys_t_seen = sys_snap.t
-            t_rel = now  # align on the same relative timebase as the current chart
-            self._sys_t.append(t_rel)
-            self._sys_cpu.append(sys_snap.cpu_percent)
-            self._sys_gpu.append(sys_snap.gpu_percent)
-            sys_cutoff = now - SYS_CHART_WINDOW_S
-            while self._sys_t and self._sys_t[0] < sys_cutoff:
-                self._sys_t.popleft()
-                self._sys_cpu.popleft()
-                self._sys_gpu.popleft()
+        if self.show_plots and sys_snap.ok:
+            self._hist_cpu.append(sys_snap.cpu_percent)
+            self._hist_gpu.append(sys_snap.gpu_percent)
 
         if self.show_plots:
-            self._redraw_chart()
-            self._redraw_sys_chart()
+            self.query_one("#spark-current", Sparkline).data = list(self._hist_current)
+            self.query_one("#spark-cpu", Sparkline).data = list(self._hist_cpu)
+            self.query_one("#spark-gpu", Sparkline).data = list(self._hist_gpu)
 
     def dev_last_voltage(self) -> float | None:
-        # Cheap enough at UI refresh rate (~12Hz) to read directly; the fast
+        # Cheap enough at UI refresh rate (5Hz) to read directly; the fast
         # sampling loop reads shunt voltage only to avoid this overhead.
         try:
             return self.dev.read_bus_voltage_v(self.sampler.channel)
         except OSError:
             return None
-
-    def _redraw_chart(self) -> None:
-        plot = self.query_one("#chart", PlotextPlot)
-        plt = plot.plt
-        plt.clear_data()
-        plt.title("Instantaneous current (mA) -- last %.0fs" % CHART_WINDOW_S)
-        plt.xlabel("t (s)")
-        plt.ylabel("mA")
-        if self._chart_t:
-            plt.plot(list(self._chart_t), list(self._chart_ma))
-        plot.refresh()
-
-    def _redraw_sys_chart(self) -> None:
-        plot = self.query_one("#syschart", PlotextPlot)
-        plt = plot.plt
-        plt.clear_data()
-        plt.title("CPU / GPU load (%%) -- last %.0fs" % SYS_CHART_WINDOW_S)
-        plt.xlabel("t (s)")
-        plt.ylabel("%")
-        plt.ylim(0, 100)
-        if self._sys_t:
-            plt.plot(list(self._sys_t), list(self._sys_cpu), label="CPU", color="cyan")
-            plt.plot(list(self._sys_t), list(self._sys_gpu), label="GPU", color="magenta")
-        plot.refresh()
 
     # -- actions --
     def action_run_baseline(self) -> None:
@@ -322,14 +321,12 @@ class EnergyApp(App):
 
     def action_reset(self) -> None:
         if not self.show_plots:
-            self.log_widget.write_line("[!] Plots disabled (--no-plots); nothing to reset.")
+            self.log_widget.write_line("[!] Sparklines disabled (--no-plots); nothing to reset.")
             return
-        self._chart_t.clear()
-        self._chart_ma.clear()
-        self._sys_t.clear()
-        self._sys_cpu.clear()
-        self._sys_gpu.clear()
-        self.log_widget.write_line("Charts cleared.")
+        self._hist_current.clear()
+        self._hist_cpu.clear()
+        self._hist_gpu.clear()
+        self.log_widget.write_line("Sparkline history cleared.")
 
 
 def main() -> None:
@@ -369,10 +366,9 @@ def main() -> None:
     parser.add_argument(
         "--no-plots",
         action="store_true",
-        help="Disable the live current and CPU/GPU charts entirely (status bars, "
-        "keybindings, and CSV/JSONL logging are unaffected). Use this if the "
-        "plotext redraws are causing lag/performance issues -- the charts are "
-        "the most render-expensive part of the UI at high refresh rates.",
+        help="Disable the live current and CPU/GPU sparklines entirely (status bars, "
+        "keybindings, and CSV/JSONL logging are unaffected). Use this for the "
+        "lowest possible UI overhead.",
     )
     args = parser.parse_args()
 

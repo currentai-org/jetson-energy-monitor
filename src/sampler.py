@@ -27,6 +27,7 @@ Threading/jitter notes:
 from __future__ import annotations
 
 import collections
+import itertools
 import threading
 import time
 from dataclasses import dataclass, field
@@ -158,11 +159,23 @@ class Sampler:
         return out
 
     def peek_recent(self, n: int) -> list[Sample]:
-        """Non-destructive peek at the last n buffered samples (for charting)."""
+        """Non-destructive peek at the last n buffered samples (for charting).
+
+        O(n), not O(len(buffer)): iterates the deque from the right only as
+        far as needed via itertools.islice(reversed(...), n), rather than
+        rebuilding a whole new deque from the (potentially huge, since it's
+        never drained while idle) source buffer. The previous implementation
+        (`collections.deque(self._buf, maxlen=n)`) silently became O(buffer
+        size) as the idle buffer grew, which is what caused the UI to bog
+        down and effectively hang after ~15s of idle running.
+        """
         with self._lock:
             if n >= len(self._buf):
                 return list(self._buf)
-            return list(collections.deque(self._buf, maxlen=n))
+            # islice(reversed(...)) walks only the last n elements; reverse
+            # once more to restore chronological order.
+            recent_reversed = itertools.islice(reversed(self._buf), n)
+            return list(reversed(list(recent_reversed)))
 
     def stats(self) -> SamplerStats:
         window = list(self._period_window)

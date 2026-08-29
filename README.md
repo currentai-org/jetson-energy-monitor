@@ -65,11 +65,15 @@ behavior after this tool exits.
   temp) aggregated over the test window, plus `sys_n_samples` and
   `sysinfo_csv_path`. Built via `tests._log_result_jsonl()`, called from
   both `run_baseline_test` and `EnergyCapture.stop`.
-- **`src/app.py`** — the Textual TUI: live current chart (last 15s) plus a
-  CPU/GPU load chart (last 60s) side by side, a status bar (latest reading,
-  achieved sample rate, jitter), a system-resource status bar (CPU, GPU,
-  RAM, swap, fan, die temperature), a scrolling test-result log, and
-  keybindings.
+- **`src/app.py`** — the Textual TUI: a status bar (latest reading, achieved
+  sample rate, jitter), a system-resource status bar (CPU, GPU, RAM, swap,
+  fan, die temperature), three single-row unicode-block sparklines (current
+  mA, CPU%, GPU%) in the jtop/jetson-stats visual style, a scrolling
+  test-result log, and keybindings. UI refresh rate is a deliberately
+  modest 5 Hz -- this is a "rough picture" tool, not an oscilloscope, and a
+  higher refresh rate mostly just burns CPU on redraws without adding real
+  information (the current-sampling rate for tests/CSVs/JSONL is completely
+  independent of and unaffected by the UI refresh rate).
 - **`src/sysinfo.py`** — background thread polling `jetson-stats` (jtop) at
   2 Hz for CPU load (aggregate + per-core), GPU load, RAM/swap usage, fan
   RPM/duty, and die temperature (thermal-junction zone). Runs independently
@@ -123,11 +127,10 @@ usage: jetson-energy-usage [-h] [--sample-hz HZ] [--sysinfo-hz HZ] [--channel {1
                       polling overhead without more real data resolution.
   --channel {1,2,3}   INA3221 channel to sample (1=VDD_IN total board power,
                       2=VDD_CPU_GPU_CV, 3=VDD_SOC). Default: 1.
-  --no-plots          Disable the live current and CPU/GPU charts entirely.
+  --no-plots          Disable the live current and CPU/GPU sparklines entirely.
                       Status bars, keybindings, and CSV/JSONL logging are
-                      unaffected -- only the plotext-rendered charts (the most
-                      render-expensive part of the UI) are skipped. Use this if
-                      you're seeing lag/performance issues from the live plots.
+                      unaffected -- only the Sparkline widgets are skipped.
+                      Use this for the lowest possible UI overhead.
 ```
 
 Example: `uv run python src/app.py --sample-hz 500 --sysinfo-hz 1` for a
@@ -139,6 +142,40 @@ No `sudo` needed as long as your user is in the `i2c` group:
 ```bash
 groups   # should list "i2c"
 ```
+
+## Performance history
+
+An earlier version of this project used `textual-plotext` for the live
+current/CPU/GPU charts. Two issues caused the UI to peg a CPU core and
+effectively hang after ~15s of runtime:
+
+1. **`Sampler.peek_recent(n)` was silently O(buffer size), not O(n).** It
+   rebuilt a whole new `collections.deque(self._buf, maxlen=n)` from the
+   source buffer on every call. Since the sample buffer isn't drained while
+   idle (only tests drain it), it grows continuously (up to a 200k-sample
+   cap at ~1kHz, ~200s of idle running), so a UI polling this 12x/sec at
+   `n=15000` became dramatically slower over time. Fixed in `sampler.py` by
+   walking only the needed elements via `itertools.islice(reversed(buf), n)`
+   -- true O(n) regardless of how long the buffer has been accumulating.
+2. **plotext's per-frame rendering of thousands of high-resolution data
+   points** was expensive even after (1) was fixed. Replaced with Textual's
+   built-in `Sparkline` widget (single-row unicode block characters, the
+   same visual style jtop/jetson-stats uses) which renders in O(terminal
+   width) per frame regardless of how much history is fed to it, and only
+   ever retains a small fixed-length rolling window (`SPARKLINE_HISTORY`,
+   120 points by default). `textual-plotext`/`plotext` are no longer
+   dependencies.
+3. **UI refresh rate reduced from 12 Hz to 5 Hz** by default -- this is a
+   "rough picture" tool, not an oscilloscope, and the higher rate mostly
+   burned CPU on redraws without adding real information (test data is
+   still captured at the full sampler rate regardless of UI refresh rate).
+
+If you still see high CPU usage after these fixes, note that a good chunk
+of it is inherent to sustaining 1kHz I2C polling in Python on a non-RT
+kernel (measured ~45-50% of one core for the sampler+sysmon threads alone,
+independent of the UI) -- use `--sample-hz` to reduce the target rate, or
+`--no-plots` to shave off the remaining sparkline overhead, if you need to
+free up more CPU headroom.
 
 ## Hardware notes
 
