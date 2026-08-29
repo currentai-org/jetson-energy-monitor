@@ -133,8 +133,8 @@ class EnergyApp(App):
         self.dev = INA3221()
         self.dev.configure_fast_single_channel(channel=channel)
         self.sampler = Sampler(self.dev, channel=channel, target_hz=target_hz)
-        self.energy = EnergyCapture(self.sampler, self.dev)
         self.sysmon = SysMonitor(poll_hz=SYS_POLL_HZ)
+        self.energy = EnergyCapture(self.sampler, self.dev, sysmon=self.sysmon)
         self._chart_t: deque[float] = deque()
         self._chart_ma: deque[float] = deque()
         self._sys_t: deque[float] = deque()
@@ -269,7 +269,7 @@ class EnergyApp(App):
         self.run_worker(self._baseline_worker, thread=True, exclusive=True)
 
     def _baseline_worker(self) -> None:
-        result = run_baseline_test(self.sampler, self.dev, duration_s=10.0)
+        result = run_baseline_test(self.sampler, self.dev, duration_s=10.0, sysmon=self.sysmon)
         self.call_from_thread(self._on_baseline_done, result)
 
     def _on_baseline_done(self, result: TestResult) -> None:

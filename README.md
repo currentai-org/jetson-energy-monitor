@@ -47,6 +47,11 @@ behavior after this tool exits.
   falling back to `~/.cache/jetson-energy-usage`) so runs can be reviewed or
   replotted later. Filenames: `YYYYMMDD_HHMMSS_<baseline|energy>.csv`. The
   written path is echoed in the TUI's result log and in `TestResult.csv_path`.
+  A second, paired CSV -- `YYYYMMDD_HHMMSS_<baseline|energy>_sysinfo.csv` --
+  captures one row per system-resource snapshot taken during the same test
+  window (CPU%, GPU%, RAM/swap used+total+%, fan RPM/duty, die temp); see
+  `write_sysinfo_csv`. Written only if system monitoring is available for
+  that run (`TestResult.sysinfo_csv_path` is `None` otherwise).
 - **`src/jsonl_log.py`** — every test run also appends one JSON object (one
   line) to a single running log, `results.jsonl`, in the same cache
   directory. One `b` invocation writes exactly one line; one complete `e`
@@ -54,10 +59,12 @@ behavior after this tool exits.
   carry different fields (e.g. only the energy test has `mwh`/`mah`; only
   the baseline test has `requested_duration_s`) -- consumers should key off
   `test_type` rather than assuming a fixed schema. Each record also carries
-  sampler jitter/rate stats and device config (channel, shunt resistance,
-  I2C address) so runs can be compared/audited later. Built via
-  `tests._log_result_jsonl()`, called from both `run_baseline_test` and
-  `EnergyCapture.stop`.
+  sampler jitter/rate stats, device config (channel, shunt resistance, I2C
+  address), and -- when system monitoring is available -- `sys_avg_/sys_min_/
+  sys_max_<field>` summary stats (CPU%, GPU%, RAM%, swap%, fan RPM, die
+  temp) aggregated over the test window, plus `sys_n_samples` and
+  `sysinfo_csv_path`. Built via `tests._log_result_jsonl()`, called from
+  both `run_baseline_test` and `EnergyCapture.stop`.
 - **`src/app.py`** — the Textual TUI: live current chart (last 15s) plus a
   CPU/GPU load chart (last 60s) side by side, a status bar (latest reading,
   achieved sample rate, jitter), a system-resource status bar (CPU, GPU,
@@ -69,7 +76,9 @@ behavior after this tool exits.
   of the INA3221 sampler so a slow/stalled jtop connection can never add
   jitter to current sampling. Degrades gracefully (`SysSnapshot(ok=False)`)
   if the jtop service isn't reachable or the client library version
-  mismatches the running service.
+  mismatches the running service. Also provides `SysRecorder`, which
+  collects a de-duplicated snapshot series during a test window and
+  produces avg/min/max summary stats (`summary_stats()`) for the JSONL log.
 
 ## Keybindings
 

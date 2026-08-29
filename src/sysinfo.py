@@ -166,3 +166,67 @@ class SysMonitor:
             temp_c=temp_c,
             temp_zones=temp_zones,
         )
+
+
+# Fields summarized (avg/min/max) for a test window and written into both
+# the per-test CSV and the JSONL summary stats. Keep this list in sync with
+# SysSnapshot's numeric fields that are meaningful to aggregate (fan_percent/
+# fan_rpm and temp_c are nullable so they're handled specially below).
+_NUMERIC_FIELDS = ["cpu_percent", "gpu_percent", "ram_percent", "swap_percent"]
+_NULLABLE_FIELDS = ["fan_rpm", "temp_c"]
+
+
+class SysRecorder:
+    """Collects a de-duplicated series of SysSnapshots from a SysMonitor over
+    the course of a test, for later CSV export + avg/min/max summarization.
+
+    jtop publishes updates at its own cadence (SysMonitor polls at
+    SYS_POLL_HZ, typically 2Hz) which is far slower than the 1kHz current
+    sampling -- callers should call `poll()` from whatever loop they're
+    already using to watch the clock/drain current samples (e.g. once per
+    ~10-100ms), and this recorder only records a new row when the
+    underlying snapshot's timestamp actually changes.
+    """
+
+    def __init__(self, sysmon: SysMonitor):
+        self.sysmon = sysmon
+        self._samples: list[SysSnapshot] = []
+        self._last_t_seen: float = 0.0
+
+    def start(self) -> None:
+        self._samples = []
+        self._last_t_seen = 0.0
+
+    def poll(self) -> None:
+        snap = self.sysmon.latest
+        if snap.ok and snap.t > self._last_t_seen:
+            self._last_t_seen = snap.t
+            self._samples.append(snap)
+
+    def samples(self) -> list[SysSnapshot]:
+        return list(self._samples)
+
+    def summary_stats(self) -> dict:
+        """Returns a flat dict of avg_/min_/max_<field> for each numeric
+        field, plus counts. Nullable fields (fan_rpm, temp_c) are summarized
+        over only the samples where they were actually reported."""
+        samples = self._samples
+        out: dict = {"sys_n_samples": len(samples)}
+        if not samples:
+            return out
+        for field_name in _NUMERIC_FIELDS:
+            values = [getattr(s, field_name) for s in samples]
+            out[f"sys_avg_{field_name}"] = sum(values) / len(values)
+            out[f"sys_min_{field_name}"] = min(values)
+            out[f"sys_max_{field_name}"] = max(values)
+        for field_name in _NULLABLE_FIELDS:
+            values = [getattr(s, field_name) for s in samples if getattr(s, field_name) is not None]
+            if values:
+                out[f"sys_avg_{field_name}"] = sum(values) / len(values)
+                out[f"sys_min_{field_name}"] = min(values)
+                out[f"sys_max_{field_name}"] = max(values)
+            else:
+                out[f"sys_avg_{field_name}"] = None
+                out[f"sys_min_{field_name}"] = None
+                out[f"sys_max_{field_name}"] = None
+        return out

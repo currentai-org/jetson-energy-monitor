@@ -4,6 +4,11 @@ Test routines built on top of the Sampler:
   - EnergyTest: start/stop-triggered capture that integrates current over
     time (trapezoidal rule) to compute mWh and mAh consumed, plus summary
     stats (mean/min/max current, duration, sample count, achieved rate).
+
+Both tests optionally accept a `sysinfo.SysMonitor` to also capture system
+resource context (CPU/GPU/RAM/swap/fan/temp) for the duration of the test:
+raw snapshots go to their own timestamped CSV (see csv_log.write_sysinfo_csv)
+and avg/min/max summary stats are folded into the JSONL result record.
 """
 from __future__ import annotations
 
@@ -12,9 +17,10 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from csv_log import write_samples_csv
+from csv_log import write_samples_csv, write_sysinfo_csv
 from jsonl_log import append_result
 from sampler import Sample, Sampler
+from sysinfo import SysMonitor, SysRecorder
 
 
 @dataclass
@@ -32,6 +38,8 @@ class TestResult:
     mah: float | None = None
     csv_path: Path | None = None
     jsonl_path: Path | None = None
+    sysinfo_csv_path: Path | None = None
+    sysinfo_summary: dict | None = None
 
     def summary_lines(self) -> list[str]:
         lines = [
@@ -45,8 +53,22 @@ class TestResult:
             lines.append(f"  bus voltage:   {self.bus_voltage_v:.3f} V")
         if self.mwh is not None:
             lines.append(f"  energy:        {self.mwh:.3f} mWh  ({self.mah:.3f} mAh)")
+        if self.sysinfo_summary and self.sysinfo_summary.get("sys_n_samples"):
+            s = self.sysinfo_summary
+            lines.append(
+                f"  CPU avg/max:   {s.get('sys_avg_cpu_percent', 0):.1f}% / {s.get('sys_max_cpu_percent', 0):.1f}%"
+            )
+            lines.append(
+                f"  GPU avg/max:   {s.get('sys_avg_gpu_percent', 0):.1f}% / {s.get('sys_max_gpu_percent', 0):.1f}%"
+            )
+            if s.get("sys_avg_temp_c") is not None:
+                lines.append(
+                    f"  die temp avg/max: {s['sys_avg_temp_c']:.1f} C / {s['sys_max_temp_c']:.1f} C"
+                )
         if self.csv_path is not None:
             lines.append(f"  raw samples:   {self.csv_path}")
+        if self.sysinfo_csv_path is not None:
+            lines.append(f"  sysinfo csv:   {self.sysinfo_csv_path}")
         if self.jsonl_path is not None:
             lines.append(f"  logged to:     {self.jsonl_path}")
         return lines
@@ -83,10 +105,9 @@ def _log_result_jsonl(
 ) -> Path:
     """Builds a rich JSON record for this test run and appends it to the
     shared results.jsonl in the cache dir. Includes everything from
-    TestResult, plus sampler jitter/rate stats, device/config context, and
-    a wall-clock ISO timestamp (perf_counter() values in TestResult aren't
-    meaningful across process runs, so we also capture time.time()-based
-    fields for cross-run comparison).
+    TestResult, plus sampler jitter/rate stats, device/config context, a
+    wall-clock ISO timestamp, and (if available) system-resource avg/min/max
+    summary stats (see sysinfo.SysRecorder.summary_stats).
     """
     stats = sampler.stats()
     now_wall = time.time()
@@ -117,26 +138,41 @@ def _log_result_jsonl(
         "i2c_channel": sampler.channel,
         "shunt_ohms": dev.shunt_ohms,
         "i2c_address": hex(dev.address),
+        # --- system resource context (avg/min/max over the test window) ---
+        "sysinfo_csv_path": str(result.sysinfo_csv_path) if result.sysinfo_csv_path else None,
     }
+    if result.sysinfo_summary:
+        record.update(result.sysinfo_summary)
     if extra:
         record.update(extra)
     return append_result(record)
 
 
-def run_baseline_test(sampler: Sampler, dev, duration_s: float = 10.0) -> TestResult:
+def run_baseline_test(
+    sampler: Sampler, dev, duration_s: float = 10.0, sysmon: SysMonitor | None = None
+) -> TestResult:
     """Blocking-ish baseline capture: assumes sampler is already running
     continuously; this just watches the clock and collects what accumulates.
     Call from a worker thread/async task, not the UI thread, if using Textual.
+
+    If `sysmon` is provided, also records system-resource snapshots for the
+    duration of the test window (own CSV + avg/min/max in the JSONL record).
     """
     sampler.drain()  # clear stale samples so we only measure this window
+    sys_rec = SysRecorder(sysmon) if sysmon is not None else None
+    if sys_rec is not None:
+        sys_rec.start()
     start = time.perf_counter()
     while time.perf_counter() - start < duration_s:
         time.sleep(0.01)
+        if sys_rec is not None:
+            sys_rec.poll()
     samples = sampler.drain()
     mean_ma, min_ma, max_ma, dur = _stats_from_samples(samples)
     achieved_hz = (len(samples) / dur) if dur > 0 else 0.0
     bus_v = dev.read_bus_voltage_v(sampler.channel)
     csv_path = write_samples_csv("baseline", samples, bus_voltage_v=bus_v) if samples else None
+    sysinfo_csv_path = write_sysinfo_csv("baseline", sys_rec.samples()) if sys_rec is not None else None
     result = TestResult(
         name="Baseline (idle) power test",
         started_at=start,
@@ -148,6 +184,8 @@ def run_baseline_test(sampler: Sampler, dev, duration_s: float = 10.0) -> TestRe
         achieved_hz=achieved_hz,
         bus_voltage_v=bus_v,
         csv_path=csv_path,
+        sysinfo_csv_path=sysinfo_csv_path,
+        sysinfo_summary=sys_rec.summary_stats() if sys_rec is not None else None,
     )
     result.jsonl_path = _log_result_jsonl(
         "baseline", result, sampler, dev, extra={"requested_duration_s": duration_s}
@@ -158,23 +196,29 @@ def run_baseline_test(sampler: Sampler, dev, duration_s: float = 10.0) -> TestRe
 class EnergyCapture:
     """Spacebar-toggled start/stop energy capture session."""
 
-    def __init__(self, sampler: Sampler, dev):
+    def __init__(self, sampler: Sampler, dev, sysmon: SysMonitor | None = None):
         self.sampler = sampler
         self.dev = dev
+        self.sysmon = sysmon
         self.active = False
         self._samples: list[Sample] = []
+        self._sys_rec: SysRecorder | None = SysRecorder(sysmon) if sysmon is not None else None
 
     def start(self) -> None:
         self.sampler.drain()
         self._samples = []
         self.active = True
+        if self._sys_rec is not None:
+            self._sys_rec.start()
 
     def poll(self) -> None:
         """Call periodically (e.g. from UI refresh) while active to accumulate
         drained samples -- keeps the sampler's internal buffer from growing
-        unbounded during a long capture."""
+        unbounded during a long capture -- and to record sysinfo snapshots."""
         if self.active:
             self._samples.extend(self.sampler.drain())
+            if self._sys_rec is not None:
+                self._sys_rec.poll()
 
     def stop(self) -> TestResult:
         self.active = False
@@ -185,6 +229,9 @@ class EnergyCapture:
         bus_v = self.dev.read_bus_voltage_v(self.sampler.channel)
         mah, mwh = integrate_mwh(samples, bus_v)
         csv_path = write_samples_csv("energy", samples, bus_voltage_v=bus_v) if samples else None
+        sysinfo_csv_path = (
+            write_sysinfo_csv("energy", self._sys_rec.samples()) if self._sys_rec is not None else None
+        )
         result = TestResult(
             name="Energy usage test",
             started_at=samples[0].t if samples else time.perf_counter(),
@@ -198,6 +245,8 @@ class EnergyCapture:
             mwh=mwh,
             mah=mah,
             csv_path=csv_path,
+            sysinfo_csv_path=sysinfo_csv_path,
+            sysinfo_summary=self._sys_rec.summary_stats() if self._sys_rec is not None else None,
         )
         result.jsonl_path = _log_result_jsonl("energy", result, self.sampler, self.dev)
         return result

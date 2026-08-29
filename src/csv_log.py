@@ -52,3 +52,62 @@ def write_samples_csv(test_name: str, samples: list[Sample], bus_voltage_v: floa
             writer.writerow(row)
 
     return path
+
+
+def write_sysinfo_csv(test_name: str, sys_samples: list) -> Path | None:
+    """Writes one row per system-resource snapshot (SysSnapshot from
+    sysinfo.py) captured during a test: wall-clock time, elapsed_s (relative
+    to the first snapshot), CPU%, GPU%, RAM used/total/%, swap used/total/%,
+    fan RPM/duty, and die temperature. Returns None (writes nothing) if no
+    snapshots were captured (e.g. jtop unavailable for the whole test).
+    Filename mirrors write_samples_csv's convention with a "_sysinfo" suffix
+    so the two CSVs for one test run are easy to pair up by timestamp+name.
+    """
+    if not sys_samples:
+        return None
+    slug = "".join(c if c.isalnum() or c in "-_" else "_" for c in test_name.lower())
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    path = cache_dir() / f"{ts}_{slug}_sysinfo.csv"
+
+    t0 = sys_samples[0].t
+    with path.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "sample_index",
+                "elapsed_s",
+                "wall_time",
+                "cpu_percent",
+                "gpu_percent",
+                "ram_used_mb",
+                "ram_total_mb",
+                "ram_percent",
+                "swap_used_mb",
+                "swap_total_mb",
+                "swap_percent",
+                "fan_rpm",
+                "fan_percent",
+                "temp_c",
+            ]
+        )
+        for i, s in enumerate(sys_samples):
+            writer.writerow(
+                [
+                    i,
+                    f"{s.t - t0:.3f}",
+                    f"{s.t:.3f}",
+                    f"{s.cpu_percent:.2f}",
+                    f"{s.gpu_percent:.2f}",
+                    f"{s.ram_used_mb:.1f}",
+                    f"{s.ram_total_mb:.1f}",
+                    f"{s.ram_percent:.2f}",
+                    f"{s.swap_used_mb:.1f}",
+                    f"{s.swap_total_mb:.1f}",
+                    f"{s.swap_percent:.2f}",
+                    f"{s.fan_rpm:.1f}" if s.fan_rpm is not None else "",
+                    f"{s.fan_percent:.1f}" if s.fan_percent is not None else "",
+                    f"{s.temp_c:.2f}" if s.temp_c is not None else "",
+                ]
+            )
+
+    return path
