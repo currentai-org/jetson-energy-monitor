@@ -41,6 +41,12 @@ behavior after this tool exits.
   - `run_baseline_test`: averages current over a fixed window (default 10s).
   - `EnergyCapture`: start/stop-triggered capture; integrates current over
     time via the trapezoidal rule to compute mAh/mWh consumed.
+- **`src/csv_log.py`** — every test run's raw per-sample data (elapsed time,
+  instantaneous current, estimated instantaneous power) is written to a
+  timestamped CSV in the user cache directory (`$XDG_CACHE_HOME/jetson-energy-usage`,
+  falling back to `~/.cache/jetson-energy-usage`) so runs can be reviewed or
+  replotted later. Filenames: `YYYYMMDD_HHMMSS_<baseline|energy>.csv`. The
+  written path is echoed in the TUI's result log and in `TestResult.csv_path`.
 - **`src/app.py`** — the Textual TUI: live current chart (last 15s), status
   bar (latest reading, achieved sample rate, jitter), scrolling test-result
   log, and keybindings.

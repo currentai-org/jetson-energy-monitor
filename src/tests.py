@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
+from csv_log import write_samples_csv
 from sampler import Sample, Sampler
 
 
@@ -26,6 +28,7 @@ class TestResult:
     bus_voltage_v: float | None = None
     mwh: float | None = None
     mah: float | None = None
+    csv_path: Path | None = None
 
     def summary_lines(self) -> list[str]:
         lines = [
@@ -39,6 +42,8 @@ class TestResult:
             lines.append(f"  bus voltage:   {self.bus_voltage_v:.3f} V")
         if self.mwh is not None:
             lines.append(f"  energy:        {self.mwh:.3f} mWh  ({self.mah:.3f} mAh)")
+        if self.csv_path is not None:
+            lines.append(f"  raw samples:   {self.csv_path}")
         return lines
 
 
@@ -77,6 +82,7 @@ def run_baseline_test(sampler: Sampler, dev, duration_s: float = 10.0) -> TestRe
     mean_ma, min_ma, max_ma, dur = _stats_from_samples(samples)
     achieved_hz = (len(samples) / dur) if dur > 0 else 0.0
     bus_v = dev.read_bus_voltage_v(sampler.channel)
+    csv_path = write_samples_csv("baseline", samples, bus_voltage_v=bus_v) if samples else None
     return TestResult(
         name="Baseline (idle) power test",
         started_at=start,
@@ -87,6 +93,7 @@ def run_baseline_test(sampler: Sampler, dev, duration_s: float = 10.0) -> TestRe
         max_current_ma=max_ma,
         achieved_hz=achieved_hz,
         bus_voltage_v=bus_v,
+        csv_path=csv_path,
     )
 
 
@@ -119,6 +126,7 @@ class EnergyCapture:
         achieved_hz = (len(samples) / dur) if dur > 0 else 0.0
         bus_v = self.dev.read_bus_voltage_v(self.sampler.channel)
         mah, mwh = integrate_mwh(samples, bus_v)
+        csv_path = write_samples_csv("energy", samples, bus_voltage_v=bus_v) if samples else None
         return TestResult(
             name="Energy usage test",
             started_at=samples[0].t if samples else time.perf_counter(),
@@ -131,4 +139,5 @@ class EnergyCapture:
             bus_voltage_v=bus_v,
             mwh=mwh,
             mah=mah,
+            csv_path=csv_path,
         )
