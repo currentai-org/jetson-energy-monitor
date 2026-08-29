@@ -110,7 +110,7 @@ python src/app.py
 ### Command-line flags
 
 ```
-usage: jetson-energy-usage [-h] [--sample-hz HZ] [--sysinfo-hz HZ] [--channel {1,2,3}]
+usage: jetson-energy-usage [-h] [--sample-hz HZ] [--sysinfo-hz HZ] [--channel {1,2,3}] [--no-plots]
 
   --sample-hz HZ     Target INA3221 current sampling rate in Hz (default: 1000).
                       Measured achievable rate on pocket-infer-6a8f is ~1600 Hz
@@ -123,10 +123,16 @@ usage: jetson-energy-usage [-h] [--sample-hz HZ] [--sysinfo-hz HZ] [--channel {1
                       polling overhead without more real data resolution.
   --channel {1,2,3}   INA3221 channel to sample (1=VDD_IN total board power,
                       2=VDD_CPU_GPU_CV, 3=VDD_SOC). Default: 1.
+  --no-plots          Disable the live current and CPU/GPU charts entirely.
+                      Status bars, keybindings, and CSV/JSONL logging are
+                      unaffected -- only the plotext-rendered charts (the most
+                      render-expensive part of the UI) are skipped. Use this if
+                      you're seeing lag/performance issues from the live plots.
 ```
 
 Example: `uv run python src/app.py --sample-hz 500 --sysinfo-hz 1` for a
-lower-overhead run.
+lower-overhead run, or `uv run python src/app.py --no-plots` if the charts
+themselves are the bottleneck.
 
 No `sudo` needed as long as your user is in the `i2c` group:
 
