@@ -35,6 +35,7 @@ class TestResult:
     max_current_ma: float
     achieved_hz: float
     bus_voltage_v: float | None = None
+    mean_power_mw: float | None = None
     mwh: float | None = None
     mah: float | None = None
     csv_path: Path | None = None
@@ -52,6 +53,8 @@ class TestResult:
         ]
         if self.bus_voltage_v is not None:
             lines.append(f"  bus voltage:   {self.bus_voltage_v:.3f} V")
+        if self.mean_power_mw is not None:
+            lines.append(f"  mean power:    {self.mean_power_mw:.1f} mW")
         if self.mwh is not None:
             lines.append(f"  energy:        {self.mwh:.3f} mWh  ({self.mah:.3f} mAh)")
         if self.sysinfo_summary and self.sysinfo_summary.get("sys_n_samples"):
@@ -126,6 +129,7 @@ def _log_result_jsonl(
         "max_current_ma": result.max_current_ma,
         "achieved_hz": result.achieved_hz,
         "bus_voltage_v": result.bus_voltage_v,
+        "mean_power_mw": result.mean_power_mw,
         "mwh": result.mwh,
         "mah": result.mah,
         "csv_path": str(result.csv_path) if result.csv_path else None,
@@ -173,6 +177,7 @@ def run_baseline_test(
     mean_ma, min_ma, max_ma, dur = _stats_from_samples(samples)
     achieved_hz = (len(samples) / dur) if dur > 0 else 0.0
     bus_v = dev.read_bus_voltage_v(sampler.channel)
+    mean_power_mw = mean_ma * bus_v
     csv_path = write_samples_csv("baseline", samples, bus_voltage_v=bus_v) if samples else None
     sysinfo_csv_path = write_sysinfo_csv("baseline", sys_rec.samples()) if sys_rec is not None else None
     result = TestResult(
@@ -185,6 +190,7 @@ def run_baseline_test(
         max_current_ma=max_ma,
         achieved_hz=achieved_hz,
         bus_voltage_v=bus_v,
+        mean_power_mw=mean_power_mw,
         csv_path=csv_path,
         sysinfo_csv_path=sysinfo_csv_path,
         sysinfo_summary=sys_rec.summary_stats() if sys_rec is not None else None,
@@ -230,6 +236,7 @@ class EnergyCapture:
         achieved_hz = (len(samples) / dur) if dur > 0 else 0.0
         bus_v = self.dev.read_bus_voltage_v(self.sampler.channel)
         mah, mwh = integrate_mwh(samples, bus_v)
+        mean_power_mw = (mwh / (dur / 3600.0)) if dur > 0 else 0.0
         csv_path = write_samples_csv("energy", samples, bus_voltage_v=bus_v) if samples else None
         sysinfo_csv_path = (
             write_sysinfo_csv("energy", self._sys_rec.samples()) if self._sys_rec is not None else None
@@ -244,6 +251,7 @@ class EnergyCapture:
             max_current_ma=max_ma,
             achieved_hz=achieved_hz,
             bus_voltage_v=bus_v,
+            mean_power_mw=mean_power_mw,
             mwh=mwh,
             mah=mah,
             csv_path=csv_path,
