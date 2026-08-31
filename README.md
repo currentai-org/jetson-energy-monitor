@@ -278,6 +278,45 @@ CSV/JSONL pipeline was also re-verified end-to-end against the new
 ring-buffer-based `Sampler` to confirm no behavior regression from the
 storage-format change.
 
+## CPU-load square-wave glitch fix (2026-08-31)
+
+Observed symptom: the "CPU:" sparkline/readout reliably alternated between
+a fixed value (e.g. always exactly 3.78%) and the real instantaneous
+reading, producing a clean square-wave pattern -- not present in current,
+die temp, or GPU load, which come from different code paths.
+
+Root cause (confirmed via raw `jtop` polling independent of this
+project's own threading/sampling code, ruling out a bug in our own
+`SysMonitor`): the `jtop` **system service** itself (root-owned, shared
+across every user of this device -- not something this project can or
+should patch) periodically calls `CPUService.reset_estimation()` on its
+internal `/proc/stat` delta tracker whenever its control queue goes
+briefly idle between client requests. The very next CPU reading after a
+reset computes its delta against an all-zero baseline instead of the
+real previous sample, which yields the *cumulative average utilization
+since boot* -- a value that looks suspiciously constant because it barely
+changes reading to reading -- instead of a true instantaneous reading.
+This glitch value was confirmed to appear on **every other** update (a
+strict 50% duty cycle), which is exactly why it presented as a clean
+square wave rather than occasional noisy outliers; a median-of-N smoothing
+filter cannot reject a value that dominates every small window like that.
+
+Fix: `sysinfo.py` gained `_ProcStatCpuReader`, which reads `/proc/stat`
+directly (the same file jtop's own CPU code parses internally) and keeps
+its own **private** per-`SysMonitor` delta-tracking state, so no other
+process/thread sharing the jtop service can ever reset it out from under
+us. GPU load, RAM/swap, fan, and temperature are unaffected by this bug
+and still come from `jtop` as before -- only the CPU percentage
+computation was replaced.
+
+Verified: raw before/after `jtop` polling confirmed the exact alternating
+pattern and its disappearance; 10+ minutes of live `SysMonitor` polling
+post-fix showed smooth, non-repeating CPU readings; a synthetic `dd`
+stress test confirmed the new reader still tracks real load correctly
+(idle ~1-2% -> ~34% under 2 fully-busy cores on this 6-core device ->
+back to idle); and the full Textual UI's `CPU:` field was confirmed to
+transition smoothly with no snap-back artifact.
+
 ## Hardware notes
 
 - **jetson-stats version pinning:** this project pins `jetson-stats==4.3.2`
