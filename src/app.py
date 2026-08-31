@@ -125,13 +125,15 @@ class SysPanel(Static):
 
 
 class EnergyApp(App):
+    TITLE = "Jetson Energy Usage"
+
     CSS = """
     Screen {
         layout: vertical;
     }
     #status, #sysstatus {
-        height: 3;
-        padding: 1;
+        height: 1;
+        padding: 0 1;
         background: $panel;
     }
     .spark-row {
@@ -161,6 +163,16 @@ class EnergyApp(App):
     #log {
         height: 1fr;
         border: solid $accent;
+    }
+    /* Textual's default Log text-selection highlight (the "screen--selection"
+       component class) uses a semi-transparent primary-color background
+       plus an overridden foreground color, which can render as an
+       unreadable solid-color block depending on the active theme (reported:
+       a green rectangle that swallows the text). Override with a background
+       that gives clear contrast while leaving the text's own color alone
+       (no `color:` override here), so highlighted log lines stay legible. */
+    Screen > .screen--selection {
+        background: $accent 50%;
     }
     """
 
@@ -339,6 +351,7 @@ class EnergyApp(App):
             return
         self.mode = "BASELINE RUNNING (10s)..."
         self._baseline_running = True
+        self.log_widget.write_line("Baseline test started (10s).")
         self.run_worker(self._baseline_worker, thread=True, exclusive=True)
 
     def _baseline_worker(self) -> None:
@@ -349,6 +362,7 @@ class EnergyApp(App):
         self._baseline_running = False
         self.mode = "idle"
         self._last_result = result
+        self.log_widget.write_line("Baseline test stopped.")
         for line in result.summary_lines():
             self.log_widget.write_line(line)
 
