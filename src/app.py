@@ -81,14 +81,21 @@ class StatusPanel(Static):
         achieved_hz: float,
         jitter_us: float,
         max_period_us: float,
+        running: bool = False,
     ) -> str:
         if latest_ma is None:
             reading = "-- mA"
         else:
             reading = f"{latest_ma:7.1f} mA"
         v_str = f"{latest_v:.3f} V" if latest_v is not None else "--- V"
+        # Pad the plain text first, then wrap in markup -- padding a string
+        # that already contains [red]...[/red] tags would count those tag
+        # characters towards the width, misaligning the Channel:/Latest:
+        # columns that follow.
+        mode_padded = f"{mode:<28}"
+        mode_str = f"[red]{mode_padded}[/red]" if running else mode_padded
         return (
-            f"[b]Mode:[/b] {mode:<28} "
+            f"[b]Mode:[/b] {mode_str} "
             f"[b]Channel:[/b] {channel_label:<12} "
             f"[b]Latest:[/b] {reading}  {v_str}   "
             f"[b]Rate:[/b] {achieved_hz:6.1f} Hz   "
@@ -277,6 +284,7 @@ class EnergyApp(App):
                 achieved_hz=stats.achieved_hz,
                 jitter_us=stats.jitter_std_us,
                 max_period_us=stats.max_period_us,
+                running=testing,
             )
         )
 
