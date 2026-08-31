@@ -138,7 +138,7 @@ class EnergyApp(App):
         color: magenta;
     }
     #log {
-        height: 10;
+        height: 1fr;
         border: solid $accent;
     }
     """
