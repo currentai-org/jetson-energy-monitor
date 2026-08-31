@@ -183,16 +183,16 @@ class EnergyApp(App):
         yield SysPanel(id="sysstatus")
         if self.show_plots:
             with Horizontal(classes="spark-row"):
-                yield Static("Current (mA):", classes="spark-label")
+                yield Static("Current (mA):", id="label-current", classes="spark-label")
                 yield Sparkline([], id="spark-current")
             with Horizontal(classes="spark-row"):
-                yield Static("CPU load (%):", classes="spark-label")
+                yield Static("CPU load (%):", id="label-cpu", classes="spark-label")
                 yield Sparkline([], id="spark-cpu")
             with Horizontal(classes="spark-row"):
-                yield Static("GPU load (%):", classes="spark-label")
+                yield Static("GPU load (%):", id="label-gpu", classes="spark-label")
                 yield Sparkline([], id="spark-gpu")
             with Horizontal(classes="spark-row"):
-                yield Static("Die temp (C):", classes="spark-label")
+                yield Static("Die temp (C):", id="label-temp", classes="spark-label")
                 yield Sparkline([], id="spark-temp")
         yield Log(id="log", highlight=False)
         yield Footer()
@@ -224,11 +224,13 @@ class EnergyApp(App):
         # single latest value (O(1), no buffer traversal) so the sparkline
         # still shows some movement without touching the buffer.
         testing = self._baseline_running or self.energy.active
+        latest_current_ma: float | None = None
         if self.show_plots:
             if testing:
                 latest = self.sampler.latest
                 if latest is not None:
                     self._hist_current.append(latest.current_ma)
+                    latest_current_ma = latest.current_ma
             else:
                 # Idle: safe to drain. This also prevents the sample buffer
                 # from silently growing to its 200k-sample cap while no
@@ -240,6 +242,7 @@ class EnergyApp(App):
                 if drained:
                     mean_ma = sum(s.current_ma for s in drained) / len(drained)
                     self._hist_current.append(mean_ma)
+                    latest_current_ma = mean_ma
 
         # If an energy capture is active, keep draining into it so the
         # sampler's bounded buffer never overflows on a long capture.
@@ -277,6 +280,18 @@ class EnergyApp(App):
             self.query_one("#spark-cpu", Sparkline).data = list(self._hist_cpu)
             self.query_one("#spark-gpu", Sparkline).data = list(self._hist_gpu)
             self.query_one("#spark-temp", Sparkline).data = list(self._hist_temp)
+
+            cur_str = f"{latest_current_ma:.1f}" if latest_current_ma is not None else "--"
+            self.query_one("#label-current", Static).update(f"Current (mA):\n{cur_str}")
+
+            cpu_str = f"{sys_snap.cpu_percent:.1f}" if sys_snap.ok else "--"
+            self.query_one("#label-cpu", Static).update(f"CPU load (%):\n{cpu_str}")
+
+            gpu_str = f"{sys_snap.gpu_percent:.1f}" if sys_snap.ok else "--"
+            self.query_one("#label-gpu", Static).update(f"GPU load (%):\n{gpu_str}")
+
+            temp_str = f"{sys_snap.temp_c:.1f}" if sys_snap.ok and sys_snap.temp_c is not None else "--"
+            self.query_one("#label-temp", Static).update(f"Die temp (C):\n{temp_str}")
 
     def dev_last_voltage(self) -> float | None:
         # Cheap enough at UI refresh rate (5Hz) to read directly; the fast
