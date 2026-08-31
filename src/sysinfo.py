@@ -13,6 +13,31 @@ a client library version that matches it -- this project pins
 `jetson-stats==4.3.2` in pyproject.toml to match the version bundled with
 L4T 36.5.0 on pocket-infer-6a8f (`sudo jtop --install-service` would only
 be needed if a version mismatch error appears after a package upgrade).
+
+CPU reading glitch workaround: the jtop *system service* (root-owned,
+shared across all users of the device -- not something this project can
+or should patch) periodically calls `CPUService.reset_estimation()` on
+its internal `/proc/stat` delta tracker whenever its control queue goes
+briefly idle (see `jtop/service.py`'s `queue.Empty` handler and
+`jtop/core/cpu.py`'s `get_utilization()`). The very next CPU reading
+after a reset computes its delta against an all-zero baseline instead of
+the previous real sample, which yields the *cumulative average
+utilization since boot* instead of an instantaneous reading. Confirmed
+via direct raw jtop polling that this glitch value appears on **every
+other** update (a strict 50% duty cycle square wave, e.g. always exactly
+"3.78%" alternating with genuine live readings on pocket-infer-6a8f) --
+not a rare one-off, so a median-of-N filter cannot reject it (it would
+dominate any small window). GPU load and temperature come from
+different, non-delta-based jtop code paths and are unaffected.
+
+Fix: bypass jtop's shared CPU estimator entirely. `_ProcStatCpuReader`
+below reads `/proc/stat` directly and keeps its own **private** delta
+state (one instance per `SysMonitor`), so no other client sharing the
+jtop service can ever reset it out from under us. This is the same
+`/proc/stat` parsing jtop itself does internally (see `jtop/core/cpu.py`
+if comparing), just with delta-tracking state that isn't shared process-
+or service-wide. All non-CPU fields (GPU/RAM/swap/fan/temp) still come
+from jtop as before.
 """
 from __future__ import annotations
 
@@ -25,6 +50,55 @@ try:
 except ImportError:  # pragma: no cover - allows the rest of the app to run
     jtop = None
     JtopException = Exception
+
+
+class _ProcStatCpuReader:
+    """Computes instantaneous CPU utilization directly from /proc/stat,
+    maintaining its own private previous-sample state so it can never be
+    disrupted by another process/thread's estimator being reset (see
+    module docstring -- this is what jtop's shared service-side estimator
+    is vulnerable to).
+
+    /proc/stat format per CPU line (aggregate line has no number suffix):
+        cpu<N> user nice system idle iowait irq softirq [steal guest ...]
+    All fields are cumulative jiffy counts since boot; utilization is the
+    delta over the polling interval, not the raw counters themselves.
+    """
+
+    def __init__(self, path: str = "/proc/stat"):
+        self.path = path
+        self._last_total: dict[int | None, list[float]] = {}
+
+    def read(self) -> tuple[float, list[float]]:
+        """Returns (aggregate_cpu_percent, per_core_cpu_percent_list)."""
+        aggregate = 0.0
+        per_core: list[float] = []
+        with open(self.path) as f:
+            for line in f:
+                if not line.startswith("cpu"):
+                    break  # all cpu* lines are contiguous at the top
+                parts = line.split()
+                label = parts[0]
+                fields = [float(x) for x in parts[1:8]]  # user..softirq
+                key: int | None = None if label == "cpu" else int(label[3:])
+                pct = self._delta_percent(key, fields)
+                if key is None:
+                    aggregate = pct
+                else:
+                    per_core.append(pct)
+        return aggregate, per_core
+
+    def _delta_percent(self, key: int | None, fields: list[float]) -> float:
+        prev = self._last_total.get(key)
+        self._last_total[key] = fields
+        if prev is None:
+            return 0.0  # no baseline yet on the very first read
+        delta = [now - old for now, old in zip(fields, prev)]
+        total = sum(delta)
+        if total <= 0:
+            return 0.0
+        idle = delta[3]  # index 3 = 'idle' in user/nice/system/idle/...
+        return 100.0 * (1.0 - idle / total)
 
 
 @dataclass
@@ -60,6 +134,7 @@ class SysMonitor:
         self.latest = SysSnapshot()
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        self._cpu_reader = _ProcStatCpuReader()
 
     def start(self) -> None:
         if self._thread is not None:
@@ -88,16 +163,11 @@ class SysMonitor:
         except Exception as e:  # pragma: no cover - defensive
             self.latest = SysSnapshot(ok=False, error=f"unexpected: {e!r}")
 
-    @staticmethod
-    def _snapshot_from(jetson) -> SysSnapshot:
-        cpu = jetson.cpu
-        cpu_total = cpu.get("total", {})
-        cpu_percent = 100.0 - cpu_total.get("idle", 100.0)
-        per_core = [
-            100.0 - c.get("idle", 100.0)
-            for c in cpu.get("cpu", [])
-            if c.get("online", False)
-        ]
+    def _snapshot_from(self, jetson) -> SysSnapshot:
+        # CPU: read directly from /proc/stat via our own private delta
+        # tracker (see module docstring) instead of jetson.cpu, which is
+        # subject to the jtop-service-side reset-estimation glitch.
+        cpu_percent, per_core = self._cpu_reader.read()
 
         gpu = jetson.gpu
         gpu_percent = 0.0
