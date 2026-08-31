@@ -205,6 +205,71 @@ in-process fix. If you see achieved-rate lag that doesn't match the
 pattern above, check `uptime`/`ps aux --sort=-%cpu` for competing load
 before assuming it's a code regression.
 
+## CPU-footprint reduction pass (2026-08-31)
+
+The user's application shares this device with the sampler, so further
+reducing the sampler's own CPU cost (beyond the achieved-rate fix above)
+matters independent of accuracy. Four changes landed from a broader
+options/effort tradeoff analysis (see `.hermes/plans/` for the full
+options list, including options deferred for later):
+
+1. **Absolute-deadline sleep via `clock_nanosleep(CLOCK_MONOTONIC,
+   TIMER_ABSTIME, ...)`** (through `ctypes`, no new dependency) replaces the
+   previous relative `time.sleep()` in the sampler's wait loop. The old
+   design had to keep a large busy-spin window (500us) before each sample
+   deadline because a relative sleep's real-world wake-up precision on this
+   non-RT kernel was too imprecise to trust for anything shorter -- most of
+   the sampler's CPU cost was this unproductive spin, not the actual I2C
+   read. An absolute monotonic-clock deadline sleeps far more precisely, so
+   the spin window shrank to 50us. Falls back to the original
+   `time.sleep()`-based spin loop (larger threshold) if `clock_nanosleep`
+   isn't available on the platform (e.g. non-Linux dev environment) --
+   `sampler.py`'s `_load_clock_nanosleep()` probes for it at import time.
+2. **Preallocated ring buffer (`array.array('d', ...)` x2) replaces the
+   per-sample `Sample` dataclass + `collections.deque`** in the hot sampling
+   loop. At 1kHz that removed ~1000 small-object heap allocations/sec from
+   the producer thread; `Sample` objects are now only constructed on the
+   consumer side (`drain()`/`peek_recent()`, called at UI-tick or
+   end-of-test frequency, not per-sample). `drain()`/`peek_recent()` keep
+   their original list-of-`Sample` return type, so `tests.py`, `csv_log.py`,
+   and `app.py` needed no changes.
+3. **Bus-voltage read on the UI thread throttled from every tick (5Hz) to
+   `VOLTAGE_POLL_HZ` (1Hz default)**, with the cached value returned in
+   between. This was a second blocking I2C transaction competing for the
+   GIL against the sampler thread on every UI tick, for a value (bus
+   voltage on a stiff supply) that doesn't meaningfully change 5x/sec.
+4. **Shrunk the spin-to-sleep threshold in the sampler's wait loop** (see
+   item 1) -- listed separately in the original options list but landed
+   together with the `clock_nanosleep` change since they're two views of
+   the same fix (better sleep precision enables a smaller spin window).
+
+**Measured impact** (pocket-infer-6a8f, `/proc/<pid>/stat` utime+stime
+delta over a 15s window, device otherwise idle -- always check
+`uptime`/`ps aux --sort=-%cpu` before trusting a CPU measurement on this
+shared device):
+
+| target_hz | `--no-plots` before | `--no-plots` after | full sparkline UI after |
+|-----------|---------------------|---------------------|--------------------------|
+| 1000      | ~52-55%             | **25.2%**           | 51.8%                    |
+| 500       | (not separately measured pre-fix) | 19.4% | 41.9%                    |
+| 200       | (not separately measured pre-fix) | 12.8% | 38.9%                    |
+| 100       | (not separately measured pre-fix) | 13.7% | 36.8%                    |
+
+Roughly a **2x reduction** in `--no-plots` mode at 1kHz. With the full
+sparkline UI the improvement is smaller in relative terms -- Sparkline
+widget rendering is now the dominant remaining cost rather than the
+sampler loop itself. That's tracked as a deferred option (dirty-check
+guard before reassigning `.data`/calling `.update()` when a value hasn't
+meaningfully changed since the last tick) in the CPU-reduction options
+plan, not yet implemented.
+
+Achieved rate was re-verified at all four target rates after this change
+and still matches target closely (see table above's "achieved" figures in
+the code's own diagnostic output); the full baseline-test/energy-capture/
+CSV/JSONL pipeline was also re-verified end-to-end against the new
+ring-buffer-based `Sampler` to confirm no behavior regression from the
+storage-format change.
+
 ## Hardware notes
 
 - **jetson-stats version pinning:** this project pins `jetson-stats==4.3.2`

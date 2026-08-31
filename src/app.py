@@ -38,6 +38,14 @@ Architecture:
     renders in O(width) terminal cells, not O(data points).
   - Blocking test logic (baseline test's 10s wait) runs in a Textual
     `work`-decorated worker (thread) so the UI stays responsive.
+  - CPU-reduction pass (see project plan): `dev_last_voltage()` used to do a
+    second blocking I2C transaction every UI tick (bus voltage, on top of
+    whatever the sampler thread is doing for current). Bus voltage on a
+    stiff supply doesn't need 5Hz resolution, so real reads are now
+    throttled to VOLTAGE_POLL_HZ (1Hz default) with the cached value
+    returned in between -- removes one blocking I2C call per tick from the
+    thread that's supposed to stay light so the sampler can get the GIL
+    promptly.
 """
 from __future__ import annotations
 
@@ -58,6 +66,7 @@ from tests import EnergyCapture, TestResult, run_baseline_test
 UI_REFRESH_HZ = 5.0  # deliberately modest -- a "rough picture" tool, not a scope
 SYS_POLL_HZ = 2.0
 SPARKLINE_HISTORY = 120  # data points retained per sparkline (~24s at 5Hz refresh)
+VOLTAGE_POLL_HZ = 1.0  # how often to re-read bus voltage (see dev_last_voltage)
 
 
 class StatusPanel(Static):
@@ -176,6 +185,8 @@ class EnergyApp(App):
         self._hist_temp: deque[float] = deque(maxlen=SPARKLINE_HISTORY)
         self._baseline_running = False
         self._last_result: TestResult | None = None
+        self._cached_voltage: float | None = None
+        self._last_voltage_read_t: float = 0.0
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -294,12 +305,21 @@ class EnergyApp(App):
             self.query_one("#label-temp", Static).update(f"Die temp (C):\n{temp_str}")
 
     def dev_last_voltage(self) -> float | None:
-        # Cheap enough at UI refresh rate (5Hz) to read directly; the fast
-        # sampling loop reads shunt voltage only to avoid this overhead.
+        # CPU-reduction: this used to do a blocking I2C read every UI tick
+        # (5Hz), which is a second bus transaction competing for the GIL
+        # against the sampler thread on top of whatever it's already doing.
+        # Bus voltage on a stiff supply doesn't need 5Hz resolution (see
+        # README "Known limitations"), so we throttle real reads to
+        # VOLTAGE_POLL_HZ and return the cached value between reads.
+        now = time.perf_counter()
+        if now - self._last_voltage_read_t < 1.0 / VOLTAGE_POLL_HZ and self._cached_voltage is not None:
+            return self._cached_voltage
         try:
-            return self.dev.read_bus_voltage_v(self.sampler.channel)
+            self._cached_voltage = self.dev.read_bus_voltage_v(self.sampler.channel)
         except OSError:
-            return None
+            self._cached_voltage = None
+        self._last_voltage_read_t = now
+        return self._cached_voltage
 
     # -- actions --
     def action_run_baseline(self) -> None:
