@@ -137,6 +137,9 @@ class EnergyApp(App):
     #spark-gpu > .sparkline--max-color {
         color: magenta;
     }
+    #spark-temp > .sparkline--max-color {
+        color: red;
+    }
     #log {
         height: 1fr;
         border: solid $accent;
@@ -170,6 +173,7 @@ class EnergyApp(App):
         self._hist_current: deque[float] = deque(maxlen=SPARKLINE_HISTORY)
         self._hist_cpu: deque[float] = deque(maxlen=SPARKLINE_HISTORY)
         self._hist_gpu: deque[float] = deque(maxlen=SPARKLINE_HISTORY)
+        self._hist_temp: deque[float] = deque(maxlen=SPARKLINE_HISTORY)
         self._baseline_running = False
         self._last_result: TestResult | None = None
 
@@ -187,6 +191,9 @@ class EnergyApp(App):
             with Horizontal(classes="spark-row"):
                 yield Static("GPU load (%):", classes="spark-label")
                 yield Sparkline([], id="spark-gpu")
+            with Horizontal(classes="spark-row"):
+                yield Static("Die temp (C):", classes="spark-label")
+                yield Sparkline([], id="spark-temp")
         yield Log(id="log", highlight=False)
         yield Footer()
 
@@ -262,11 +269,14 @@ class EnergyApp(App):
         if self.show_plots and sys_snap.ok:
             self._hist_cpu.append(sys_snap.cpu_percent)
             self._hist_gpu.append(sys_snap.gpu_percent)
+            if sys_snap.temp_c is not None:
+                self._hist_temp.append(sys_snap.temp_c)
 
         if self.show_plots:
             self.query_one("#spark-current", Sparkline).data = list(self._hist_current)
             self.query_one("#spark-cpu", Sparkline).data = list(self._hist_cpu)
             self.query_one("#spark-gpu", Sparkline).data = list(self._hist_gpu)
+            self.query_one("#spark-temp", Sparkline).data = list(self._hist_temp)
 
     def dev_last_voltage(self) -> float | None:
         # Cheap enough at UI refresh rate (5Hz) to read directly; the fast
@@ -328,6 +338,7 @@ class EnergyApp(App):
         self._hist_current.clear()
         self._hist_cpu.clear()
         self._hist_gpu.clear()
+        self._hist_temp.clear()
         self.log_widget.write_line("Sparkline history cleared.")
 
 
