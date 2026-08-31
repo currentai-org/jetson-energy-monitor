@@ -58,7 +58,7 @@ from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widgets import Footer, Header, Log, Sparkline, Static
 
-from ina3221 import INA3221
+from ina3221 import CHANNEL_NAMES, INA3221, channel_from_name, channel_name
 from sampler import Sampler
 from sysinfo import SysMonitor, SysSnapshot
 from tests import EnergyCapture, TestResult, run_baseline_test
@@ -75,6 +75,7 @@ class StatusPanel(Static):
     def render_status(
         self,
         mode: str,
+        channel_label: str,
         latest_ma: float | None,
         latest_v: float | None,
         achieved_hz: float,
@@ -88,6 +89,7 @@ class StatusPanel(Static):
         v_str = f"{latest_v:.3f} V" if latest_v is not None else "--- V"
         return (
             f"[b]Mode:[/b] {mode:<28} "
+            f"[b]Channel:[/b] {channel_label:<12} "
             f"[b]Latest:[/b] {reading}  {v_str}   "
             f"[b]Rate:[/b] {achieved_hz:6.1f} Hz   "
             f"[b]Jitter (std):[/b] {jitter_us:6.1f} us   "
@@ -269,6 +271,7 @@ class EnergyApp(App):
         status.update(
             status.render_status(
                 mode=mode_label,
+                channel_label=channel_name(self.sampler.channel),
                 latest_ma=latest.current_ma if latest else None,
                 latest_v=self.dev_last_voltage(),
                 achieved_hz=stats.achieved_hz,
@@ -405,11 +408,13 @@ def main() -> None:
     )
     parser.add_argument(
         "--channel",
-        type=int,
-        default=1,
-        choices=[1, 2, 3],
-        help="INA3221 channel to sample (1=VDD_IN total board power, "
-        "2=VDD_CPU_GPU_CV, 3=VDD_SOC). Default: %(default)s.",
+        type=str,
+        default="VDD_IN",
+        choices=list(CHANNEL_NAMES.values()),
+        metavar="NAME",
+        help="INA3221 rail to sample: VDD_IN (total board input power), "
+        "VDD_CPU_GPU (combined CPU+GPU+CV rail), or VDD_SOC (SoC rail). "
+        "Default: %(default)s.",
     )
     parser.add_argument(
         "--no-plots",
@@ -421,7 +426,7 @@ def main() -> None:
     args = parser.parse_args()
 
     app = EnergyApp(
-        channel=args.channel,
+        channel=channel_from_name(args.channel),
         target_hz=args.sample_hz,
         sys_poll_hz=args.sysinfo_hz,
         show_plots=not args.no_plots,

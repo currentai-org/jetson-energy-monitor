@@ -114,7 +114,7 @@ python src/app.py
 ### Command-line flags
 
 ```
-usage: jetson-energy-usage [-h] [--sample-hz HZ] [--sysinfo-hz HZ] [--channel {1,2,3}] [--no-plots]
+usage: jetson-energy-usage [-h] [--sample-hz HZ] [--sysinfo-hz HZ] [--channel NAME] [--no-plots]
 
   --sample-hz HZ     Target INA3221 current sampling rate in Hz (default: 1000).
                       Measured achievable rate on pocket-infer-6a8f is ~1600 Hz
@@ -125,8 +125,11 @@ usage: jetson-energy-usage [-h] [--sample-hz HZ] [--sysinfo-hz HZ] [--channel {1
                       (jtop) (default: 2). jtop's own service publishes at roughly
                       1 Hz internally, so requesting much faster than that adds
                       polling overhead without more real data resolution.
-  --channel {1,2,3}   INA3221 channel to sample (1=VDD_IN total board power,
-                      2=VDD_CPU_GPU_CV, 3=VDD_SOC). Default: 1.
+  --channel NAME      INA3221 rail to sample, by name: VDD_IN (total board input
+                      power), VDD_CPU_GPU (combined CPU+GPU+CV rail), or VDD_SOC
+                      (SoC rail). Default: VDD_IN. (Prior to 2026-08-31 this took
+                      a raw channel number 1/2/3; see ina3221.py's CHANNEL_NAMES
+                      for the underlying mapping if you need it.)
   --no-plots          Disable the live current and CPU/GPU sparklines entirely.
                       Status bars, keybindings, and CSV/JSONL logging are
                       unaffected -- only the Sparkline widgets are skipped.
@@ -135,7 +138,12 @@ usage: jetson-energy-usage [-h] [--sample-hz HZ] [--sysinfo-hz HZ] [--channel {1
 
 Example: `uv run python src/app.py --sample-hz 500 --sysinfo-hz 1` for a
 lower-overhead run, or `uv run python src/app.py --no-plots` if the charts
-themselves are the bottleneck.
+themselves are the bottleneck, or `uv run python src/app.py --channel
+VDD_CPU_GPU` to isolate the CPU+GPU rail instead of total board power.
+
+The status bar's "Channel:" field always shows which rail is currently
+being sampled, so it's clear at a glance even without checking how the app
+was launched.
 
 No `sudo` needed as long as your user is in the `i2c` group:
 

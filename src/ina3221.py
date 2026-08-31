@@ -54,6 +54,32 @@ MODE_POWER_DOWN = 0b000
 
 SHUNT_LSB_UV = 40.0  # microvolts per LSB, 13-bit signed shunt voltage register
 
+# Human-readable names for the three INA3221 channels as wired on the Jetson
+# Orin Nano Developer Kit carrier board. Channel numbers (1/2/3) remain the
+# internal representation everywhere (register maps, Sampler, etc.) since
+# they map directly onto the datasheet's REG_SHUNT/REG_BUS tables -- these
+# mappings exist purely for CLI args and UI display.
+CHANNEL_NAMES: dict[int, str] = {
+    1: "VDD_IN",  # total board input power
+    2: "VDD_CPU_GPU",  # combined CPU+GPU+CV rail (labeled VDD_CPU_GPU_CV on schematic)
+    3: "VDD_SOC",  # SoC rail
+}
+NAME_TO_CHANNEL: dict[str, int] = {name: ch for ch, name in CHANNEL_NAMES.items()}
+
+
+def channel_name(channel: int) -> str:
+    """Human-readable name for a channel number (1/2/3), e.g. 'VDD_IN'."""
+    return CHANNEL_NAMES.get(channel, f"channel {channel}")
+
+
+def channel_from_name(name: str) -> int:
+    """Inverse of channel_name(); raises ValueError on an unrecognized name."""
+    try:
+        return NAME_TO_CHANNEL[name]
+    except KeyError:
+        valid = ", ".join(NAME_TO_CHANNEL)
+        raise ValueError(f"Unknown INA3221 channel name {name!r}; expected one of: {valid}")
+
 
 @dataclass
 class Ina3221Config:
@@ -154,8 +180,9 @@ class INA3221:
                 pass
 
     def configure_fast_single_channel(self, channel: int = 1) -> Ina3221Config:
-        """Configure for maximum sample rate on a single channel (default: VDD_IN,
-        channel 1 -- total board input power)."""
+        """Configure for maximum sample rate on a single channel (default:
+        channel 1 / VDD_IN, total board input power). See CHANNEL_NAMES for
+        the full channel-number-to-rail-name mapping."""
         self.save_config_for_restore()
         cfg = Ina3221Config(
             ch1_enable=(channel == 1),

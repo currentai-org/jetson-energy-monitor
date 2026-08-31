@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from csv_log import write_samples_csv, write_sysinfo_csv
+from ina3221 import channel_name
 from jsonl_log import append_result
 from sampler import Sample, Sampler
 from sysinfo import SysMonitor, SysRecorder
@@ -136,6 +137,7 @@ def _log_result_jsonl(
         "sampler_jitter_std_us": stats.jitter_std_us,
         "sampler_last_error": stats.last_error,
         "i2c_channel": sampler.channel,
+        "i2c_channel_name": channel_name(sampler.channel),
         "shunt_ohms": dev.shunt_ohms,
         "i2c_address": hex(dev.address),
         # --- system resource context (avg/min/max over the test window) ---
