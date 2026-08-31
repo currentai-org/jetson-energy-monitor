@@ -177,6 +177,34 @@ independent of the UI) -- use `--sample-hz` to reduce the target rate, or
 `--no-plots` to shave off the remaining sparkline overhead, if you need to
 free up more CPU headroom.
 
+## Achieved-rate lag fix (2026-08-31)
+
+Independent of the CPU-usage fixes above, the **achieved sampling rate**
+(shown in the status bar's "Rate:" field) used to consistently lag the
+requested `--sample-hz` by 10-20%, even at low, easily-achievable rates
+like 100Hz -- e.g. `--sample-hz 100` might show ~94-97Hz in practice. Root
+cause: **CPython's default GIL switch interval is 5ms**
+(`sys.getswitchinterval()`). When the Textual UI thread is CPU-busy
+(rendering widgets, even simple ones), the interpreter only reconsiders
+handing the GIL to the waiting sampler thread roughly every 5ms -- coarser
+than the 1ms period needed for 1kHz sampling, and enough to compound into
+a double-digit-percent shortfall at any target rate once a starved thread
+has to catch up on missed periods.
+
+Fix: `src/sampler.py` calls `sys.setswitchinterval(0.0001)` (100us) at
+import time -- a process-wide interpreter setting, harmless to set
+repeatedly, with negligible overhead compared to the accuracy gained.
+Verified on `pocket-infer-6a8f`: achieved rate now matches target almost
+exactly at 100/200/500/1000 Hz, both with `--no-plots` and with the full
+sparkline UI active (998-1000Hz achieved at a 1000Hz target either way).
+
+Note: this device is a **shared, multi-user Jetson** -- other users'
+workloads (observed: an unrelated `llama-mtmd-cli` inference job) can and
+will steal real CPU time from the sampler thread regardless of any
+in-process fix. If you see achieved-rate lag that doesn't match the
+pattern above, check `uptime`/`ps aux --sort=-%cpu` for competing load
+before assuming it's a code regression.
+
 ## Hardware notes
 
 - **jetson-stats version pinning:** this project pins `jetson-stats==4.3.2`

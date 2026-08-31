@@ -23,16 +23,39 @@ Threading/jitter notes:
     not PREEMPT_RT). We use a short sleep (sleep(0) / tiny sleep) between
     reads when the I2C transaction itself is the rate-limiting step, which
     it is here (~617us/read measured, faster than the 1ms budget).
+  - CRITICAL: CPython's default GIL switch interval is 5ms
+    (sys.getswitchinterval()). When another thread (e.g. Textual's UI/event
+    loop) is CPU-busy, the interpreter only considers handing the GIL back
+    to a waiting thread roughly every 5ms -- coarser than the 1ms period
+    needed for 1kHz sampling, and *far* coarser than needed at low target
+    rates too, since a starved thread that finally gets the GIL still has
+    to catch up on whatever periods it missed. This was measured to cause
+    the achieved rate to lag the target by 10-20% even at 100Hz once a
+    Textual app with live widgets was running alongside the sampler.
+    Importing this module calls `sys.setswitchinterval(0.0001)` (100us) as a
+    process-wide fix -- this is a global interpreter setting (not
+    per-thread), harmless to set repeatedly/from multiple call sites, and
+    resolves the lag at every rate tested (100/200/500/1000Hz) even with
+    the full sparkline UI active. The tradeoff is slightly more GIL-switch
+    overhead system-wide, which is negligible compared to the accuracy win
+    for this use case.
 """
 from __future__ import annotations
 
 import collections
 import itertools
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
 
 from ina3221 import INA3221
+
+# See "CRITICAL" note above: tightens CPython's GIL handoff granularity so
+# a busy UI thread can't starve the sampler thread past our target period.
+# Process-wide and idempotent; safe to import this module without ever
+# constructing a Sampler and still get the benefit for any other threads.
+sys.setswitchinterval(0.0001)
 
 
 @dataclass
