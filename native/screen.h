@@ -19,7 +19,11 @@
 #include <stddef.h>
 
 #define SCREEN_MAX_LINES 64
-#define SCREEN_LINE_CAP 512 /* bytes per line, generous for UTF-8 sparkline rows */
+#define SCREEN_LINE_CAP 8192 /* bytes per line -- generous for UTF-8 sparkline
+                                 rows AND worst-case truecolor ANSI escape
+                                 sequences (see sparkline.h's
+                                 SPARKLINE_COLOR_ROW_CAP) when every column
+                                 changes color */
 
 typedef struct {
     char current[SCREEN_MAX_LINES][SCREEN_LINE_CAP];

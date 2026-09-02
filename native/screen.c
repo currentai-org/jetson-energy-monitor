@@ -26,12 +26,26 @@ void screen_set_term_width(Screen *scr, int cols) {
  * exactly 1 display column wide -- see sparkline.c) as a single column
  * rather than 3, so a line isn't cut mid-glyph and column budgeting
  * matches what the terminal will actually show. Safe on plain ASCII
- * lines too (each byte = 1 column there). */
+ * lines too (each byte = 1 column there). ANSI SGR escape sequences
+ * (`\x1b[...m`, used by sparkline.c's color rendering) are zero-width --
+ * skipped entirely without consuming any of the column budget, so
+ * colored sparklines truncate at the same visual column a colorless one
+ * would. */
 static void truncate_line_to_columns(char *line, int max_cols) {
     if (max_cols < 0) max_cols = 0;
     int col = 0;
     unsigned char *p = (unsigned char *)line;
     while (*p && col < max_cols) {
+        if (*p == 0x1b && *(p + 1) == '[') {
+            /* CSI escape sequence: ESC '[' <params/intermediates> <final
+             * byte in 0x40-0x7E>. Skip the whole thing, zero columns
+             * consumed. */
+            unsigned char *q = p + 2;
+            while (*q && (*q < 0x40 || *q > 0x7e)) q++;
+            if (*q) q++; /* consume the final byte too */
+            p = q;
+            continue;
+        }
         if ((*p & 0xE0) == 0xC0) {
             p += 2; /* 2-byte UTF-8 sequence */
         } else if ((*p & 0xF0) == 0xE0) {
@@ -42,6 +56,25 @@ static void truncate_line_to_columns(char *line, int max_cols) {
             p += 1; /* plain ASCII byte */
         }
         col++;
+    }
+    /* After hitting the column budget, still keep any trailing escape
+     * sequences that start exactly at the truncation point (e.g. the
+     * final reset code right after the last visible glyph) rather than
+     * cutting them off -- otherwise a truncated colored line could leave
+     * the terminal's SGR state "stuck" applied to whatever text follows.
+     * Anything else past the budget (plain text/glyphs) is cut. Since
+     * these escapes are already contiguous in the buffer starting at p,
+     * no data needs to move -- just advance the truncation point past
+     * them before writing the NUL. */
+    if (*p == 0x1b) {
+        unsigned char *scan = p;
+        while (*scan == 0x1b && *(scan + 1) == '[') {
+            unsigned char *q = scan + 2;
+            while (*q && (*q < 0x40 || *q > 0x7e)) q++;
+            if (*q) q++;
+            scan = q;
+        }
+        p = scan;
     }
     *p = '\0';
 }

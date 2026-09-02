@@ -21,7 +21,11 @@
 
 /* Runs the TUI until the user quits ('q') or SIGINT. Owns dev/sampler/
  * sysmon for the duration (starts/stops them internally, same lifecycle
- * as main.c's --headless path). Returns 0 on clean exit. */
-int run_tui(Ina3221 *dev, Sampler *sampler, SysMonitor *sysmon, int channel);
+ * as main.c's --headless path). `use_color` enables per-metric truecolor
+ * sparkline gradients (see sparkline.h's SparklineColorScheme) matching
+ * the old Python TUI's per-metric colors; pass 0 for plain glyphs only
+ * (e.g. for terminals/multiplexers with poor truecolor support, or piped
+ * output). Returns 0 on clean exit. */
+int run_tui(Ina3221 *dev, Sampler *sampler, SysMonitor *sysmon, int channel, int use_color);
 
 #endif /* JEU_TUI_H */

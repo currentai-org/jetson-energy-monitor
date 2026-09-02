@@ -88,6 +88,8 @@ typedef struct {
     Sampler *sampler;
     SysMonitor *sysmon;
     int channel;
+    int use_color; /* --color/--no-color: enable truecolor sparkline
+                       gradients (see sparkline.h) */
 
     SparklineHistory hist_current;
     SparklineHistory hist_cpu;
@@ -322,14 +324,15 @@ static void render(TuiState *st, Screen *scr, int term_rows, int term_cols) {
     if (spark_width < 10) spark_width = 10;
     if (spark_width > 200) spark_width = 200;
 
-    char spark_bufs[SPARKLINE_ROWS][700];
+    char spark_bufs[SPARKLINE_ROWS][SPARKLINE_COLOR_ROW_CAP];
     char *spark_rows[SPARKLINE_ROWS];
     for (int r = 0; r < SPARKLINE_ROWS; r++) spark_rows[r] = spark_bufs[r];
 
     double latest_current_ma = have_latest ? latest.current_ma : 0.0;
     if (have_latest) sparkline_history_push(&st->hist_current, latest_current_ma);
-    sparkline_render_rows(&st->hist_current, spark_width, SPARKLINE_ROWS, spark_rows,
-                           sizeof(spark_bufs[0]));
+    sparkline_render_rows_color(&st->hist_current, spark_width, SPARKLINE_ROWS, spark_rows,
+                                 sizeof(spark_bufs[0]),
+                                 st->use_color ? &SPARKLINE_COLOR_CURRENT : NULL);
     screen_set_line(scr, row++, "Current (mA): %7.1f  %s", latest_current_ma, spark_rows[0]);
     for (int r = 1; r < SPARKLINE_ROWS; r++) {
         screen_set_line(scr, row++, "%-*s%s", label_width, "", spark_rows[r]);
@@ -341,24 +344,25 @@ static void render(TuiState *st, Screen *scr, int term_rows, int term_cols) {
         if (sys.temp_c > -999.0) sparkline_history_push(&st->hist_temp, sys.temp_c);
     }
 
-    sparkline_render_rows(&st->hist_cpu, spark_width, SPARKLINE_ROWS, spark_rows,
-                           sizeof(spark_bufs[0]));
+    sparkline_render_rows_color(&st->hist_cpu, spark_width, SPARKLINE_ROWS, spark_rows,
+                                 sizeof(spark_bufs[0]), st->use_color ? &SPARKLINE_COLOR_CPU : NULL);
     screen_set_line(scr, row++, "CPU load (%%): %6.1f  %s", sys.ok ? sys.cpu_percent : 0.0,
                      spark_rows[0]);
     for (int r = 1; r < SPARKLINE_ROWS; r++) {
         screen_set_line(scr, row++, "%-*s%s", label_width, "", spark_rows[r]);
     }
 
-    sparkline_render_rows(&st->hist_gpu, spark_width, SPARKLINE_ROWS, spark_rows,
-                           sizeof(spark_bufs[0]));
+    sparkline_render_rows_color(&st->hist_gpu, spark_width, SPARKLINE_ROWS, spark_rows,
+                                 sizeof(spark_bufs[0]), st->use_color ? &SPARKLINE_COLOR_GPU : NULL);
     screen_set_line(scr, row++, "GPU load (%%): %6.1f  %s", sys.ok ? sys.gpu_percent : 0.0,
                      spark_rows[0]);
     for (int r = 1; r < SPARKLINE_ROWS; r++) {
         screen_set_line(scr, row++, "%-*s%s", label_width, "", spark_rows[r]);
     }
 
-    sparkline_render_rows(&st->hist_temp, spark_width, SPARKLINE_ROWS, spark_rows,
-                           sizeof(spark_bufs[0]));
+    sparkline_render_rows_color(&st->hist_temp, spark_width, SPARKLINE_ROWS, spark_rows,
+                                 sizeof(spark_bufs[0]),
+                                 st->use_color ? &SPARKLINE_COLOR_TEMP : NULL);
     screen_set_line(scr, row++, "Die temp (C): %6.1f  %s",
                      (sys.ok && sys.temp_c > -999.0) ? sys.temp_c : 0.0, spark_rows[0]);
     for (int r = 1; r < SPARKLINE_ROWS; r++) {
@@ -381,13 +385,20 @@ static void render(TuiState *st, Screen *scr, int term_rows, int term_cols) {
     screen_flush(scr);
 }
 
-int run_tui(Ina3221 *dev, Sampler *sampler, SysMonitor *sysmon, int channel) {
-    TuiState st;
+int run_tui(Ina3221 *dev, Sampler *sampler, SysMonitor *sysmon, int channel, int use_color) {
+    /* static, not stack-local: Screen (screen.h) is ~1MB with
+     * SCREEN_LINE_CAP sized for worst-case truecolor escape sequences --
+     * keeping both off the stack avoids any risk of stack overflow
+     * regardless of the calling thread's stack size. run_tui() is only
+     * ever called once per process (no re-entrancy needed). */
+    static TuiState st;
+    static Screen scr;
     memset(&st, 0, sizeof(st));
     st.dev = dev;
     st.sampler = sampler;
     st.sysmon = sysmon;
     st.channel = channel;
+    st.use_color = use_color;
     sparkline_history_init(&st.hist_current);
     sparkline_history_init(&st.hist_cpu);
     sparkline_history_init(&st.hist_gpu);
@@ -406,7 +417,6 @@ int run_tui(Ina3221 *dev, Sampler *sampler, SysMonitor *sysmon, int channel) {
     term_enter_alt_screen();
     term_hide_cursor();
 
-    Screen scr;
     screen_init(&scr);
 
     double period = 1.0 / UI_REFRESH_HZ;

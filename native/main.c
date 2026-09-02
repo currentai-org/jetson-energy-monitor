@@ -85,7 +85,8 @@ static int key_pressed(double timeout_s) {
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
-            "usage: %s [tui|baseline|energy] [--hz N] [--duration SEC] [--channel NAME]\n"
+            "usage: %s [tui|baseline|energy] [--hz N] [--duration SEC] [--channel NAME] "
+            "[--color|--no-color]\n"
             "\n"
             "  tui                Interactive terminal UI with live sparklines (current/\n"
             "                     CPU/GPU/temp) -- same keybindings as the old Python TUI\n"
@@ -101,8 +102,30 @@ static void print_usage(const char *prog) {
             "                     for 'energy'/'tui'.\n"
             "  --channel NAME     INA3221 rail to sample: VDD_IN, VDD_CPU_GPU, or VDD_SOC\n"
             "                     (default VDD_IN).\n"
-            "  --sysinfo-hz N     Poll rate in Hz for CPU/GPU/RAM/swap/fan/temp (default %.0f).\n",
+            "  --sysinfo-hz N     Poll rate in Hz for CPU/GPU/RAM/swap/fan/temp (default %.0f).\n"
+            "  --color            Force-enable truecolor sparkline gradients in 'tui' mode\n"
+            "                     (green->per-metric color, matching the old Python TUI).\n"
+            "                     On by default when stdout is a terminal and NO_COLOR/\n"
+            "                     TERM=dumb aren't set.\n"
+            "  --no-color         Disable sparkline colors -- plain glyphs only. Use this if\n"
+            "                     your terminal/multiplexer doesn't render truecolor (24-bit\n"
+            "                     RGB) escape codes well; falls back to a lower-fidelity but\n"
+            "                     universally-readable display. Ignored for 'baseline'/\n"
+            "                     'energy' (no color output there regardless).\n",
             prog, DEFAULT_DURATION_S, DEFAULT_SAMPLE_HZ, DEFAULT_DURATION_S, DEFAULT_SYSINFO_HZ);
+}
+
+/* Picks the --color/--no-color default when neither flag is passed
+ * explicitly: on by default, but auto-disabled for environments where
+ * truecolor escape codes are unlikely to render well or could corrupt
+ * non-terminal output -- same conventions common CLI tools (git, ls
+ * --color=auto, ripgrep) use. */
+static int default_color_enabled(void) {
+    if (!isatty(STDOUT_FILENO)) return 0;      /* piped/redirected output */
+    if (getenv("NO_COLOR") != NULL) return 0;  /* https://no-color.org */
+    const char *term = getenv("TERM");
+    if (term != NULL && strcmp(term, "dumb") == 0) return 0;
+    return 1;
 }
 
 int main(int argc, char **argv) {
@@ -130,6 +153,7 @@ int main(int argc, char **argv) {
     double sysinfo_hz = DEFAULT_SYSINFO_HZ;
     double duration_s = DEFAULT_DURATION_S;
     char channel_name_buf[32] = "VDD_IN";
+    int use_color = default_color_enabled(); /* may be overridden below */
 
     for (int i = arg_start; i < argc; i++) {
         if (strcmp(argv[i], "--hz") == 0 && i + 1 < argc) {
@@ -140,6 +164,10 @@ int main(int argc, char **argv) {
             snprintf(channel_name_buf, sizeof(channel_name_buf), "%s", argv[++i]);
         } else if (strcmp(argv[i], "--sysinfo-hz") == 0 && i + 1 < argc) {
             sysinfo_hz = atof(argv[++i]);
+        } else if (strcmp(argv[i], "--color") == 0) {
+            use_color = 1;
+        } else if (strcmp(argv[i], "--no-color") == 0) {
+            use_color = 0;
         } else {
             fprintf(stderr, "unknown argument: %s\n", argv[i]);
             print_usage(argv[0]);
@@ -190,7 +218,7 @@ int main(int argc, char **argv) {
     const char *chan_label = ina3221_channel_name(channel);
 
     if (strcmp(test, "tui") == 0) {
-        int rc = run_tui(&dev, &sampler, &sysmon, channel);
+        int rc = run_tui(&dev, &sampler, &sysmon, channel, use_color);
         sysmon_stop(&sysmon);
         sysmon_destroy(&sysmon);
         sampler_stop(&sampler);

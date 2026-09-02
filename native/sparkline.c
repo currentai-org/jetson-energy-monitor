@@ -1,6 +1,7 @@
 /* sparkline.c -- see sparkline.h */
 #include "sparkline.h"
 
+#include <stdio.h>
 #include <string.h>
 
 /* 8 levels, U+2581 (LOWER ONE EIGHTH BLOCK) through U+2588 (FULL BLOCK).
@@ -179,4 +180,156 @@ void sparkline_render_rows(const SparklineHistory *h, int width, int n_rows, cha
     }
 
     for (int r = 0; r < n_rows; r++) out_rows[r][pos[r]] = '\0';
+}
+
+/* Preset color schemes -- see sparkline.h. Textual Sparkline's default
+ * "min" color is green; each metric keeps its old CSS "max" color
+ * (#spark-current: yellow, #spark-cpu: cyan, #spark-gpu: magenta,
+ * #spark-temp: red) as the high end of the gradient. RGB values are
+ * standard terminal ANSI named-color truecolor equivalents. */
+const SparklineColorScheme SPARKLINE_COLOR_CURRENT = {
+    .r_lo = 0x00, .g_lo = 0xaa, .b_lo = 0x00, /* green */
+    .r_hi = 0xaa, .g_hi = 0xaa, .b_hi = 0x00, /* yellow */
+};
+const SparklineColorScheme SPARKLINE_COLOR_CPU = {
+    .r_lo = 0x00, .g_lo = 0xaa, .b_lo = 0x00, /* green */
+    .r_hi = 0x00, .g_hi = 0xaa, .b_hi = 0xaa, /* cyan */
+};
+const SparklineColorScheme SPARKLINE_COLOR_GPU = {
+    .r_lo = 0x00, .g_lo = 0xaa, .b_lo = 0x00, /* green */
+    .r_hi = 0xaa, .g_hi = 0x00, .b_hi = 0xaa, /* magenta */
+};
+const SparklineColorScheme SPARKLINE_COLOR_TEMP = {
+    .r_lo = 0x00, .g_lo = 0xaa, .b_lo = 0x00, /* green */
+    .r_hi = 0xaa, .g_hi = 0x00, .b_hi = 0x00, /* red */
+};
+
+/* Linearly interpolates scheme->{r,g,b}_lo -> {r,g,b}_hi at fraction
+ * t in [0,1] and writes an SGR truecolor foreground escape
+ * ("\x1b[38;2;R;G;Bm") into `out`. Returns bytes written. */
+static size_t write_color_escape(const SparklineColorScheme *scheme, double t, char *out,
+                                  size_t out_cap) {
+    if (t < 0.0) t = 0.0;
+    if (t > 1.0) t = 1.0;
+    int r = (int)(scheme->r_lo + t * (scheme->r_hi - scheme->r_lo) + 0.5);
+    int g = (int)(scheme->g_lo + t * (scheme->g_hi - scheme->g_lo) + 0.5);
+    int b = (int)(scheme->b_lo + t * (scheme->b_hi - scheme->b_lo) + 0.5);
+    int n = snprintf(out, out_cap, "\x1b[38;2;%d;%d;%dm", r, g, b);
+    return (n > 0 && (size_t)n < out_cap) ? (size_t)n : 0;
+}
+
+void sparkline_render_rows_color(const SparklineHistory *h, int width, int n_rows,
+                                  char **out_rows, size_t out_cap,
+                                  const SparklineColorScheme *scheme) {
+    if (scheme == NULL) {
+        sparkline_render_rows(h, width, n_rows, out_rows, out_cap);
+        return;
+    }
+
+    if (n_rows < 1) n_rows = 1;
+    if (n_rows > SPARKLINE_MAX_ROWS) n_rows = SPARKLINE_MAX_ROWS;
+
+    if (width <= 0) {
+        for (int r = 0; r < n_rows; r++) out_rows[r][0] = '\0';
+        return;
+    }
+
+    int start;
+    double lo, hi;
+    int n = sparkline_window(h, width, &start, &lo, &hi);
+    if (n == 0) {
+        for (int r = 0; r < n_rows; r++) out_rows[r][0] = '\0';
+        return;
+    }
+
+    double range = hi - lo;
+    int total_levels = n_rows * 8;
+    int pad = width - n;
+
+    size_t pos[SPARKLINE_MAX_ROWS];
+    /* Tracks the last color fraction actually emitted per row, as a
+     * "levels" integer bucket (not raw double) so identical adjacent
+     * values reliably skip re-emitting the same escape -- keeps output
+     * size down on flat stretches, which is the common case at idle. */
+    int last_level_bucket[SPARKLINE_MAX_ROWS];
+    for (int r = 0; r < n_rows; r++) {
+        pos[r] = 0;
+        last_level_bucket[r] = -1; /* force the first glyph in each row to
+                                       emit its color */
+    }
+
+    for (int r = 0; r < n_rows; r++) {
+        for (int i = 0; i < pad && pos[r] + 1 < out_cap; i++) {
+            out_rows[r][pos[r]++] = ' ';
+        }
+    }
+
+    for (int i = 0; i < n; i++) {
+        int idx = (start + i) % SPARKLINE_HISTORY;
+        double v = h->values[idx];
+        int level;
+        if (range <= 0.0) {
+            level = total_levels / 2;
+        } else {
+            level = (int)(((v - lo) / range) * total_levels + 0.5);
+            if (level < 0) level = 0;
+            if (level > total_levels) level = total_levels;
+        }
+        double t = (double)level / (double)total_levels; /* 0..1, color
+                                                              interpolation
+                                                              fraction --
+                                                              same value
+                                                              feeding all
+                                                              rows, so a
+                                                              tall stack
+                                                              is one
+                                                              consistent
+                                                              color, not a
+                                                              rainbow per
+                                                              row */
+
+        for (int r = 0; r < n_rows; r++) {
+            int rank_from_bottom = n_rows - 1 - r;
+            int row_floor = rank_from_bottom * 8;
+            int row_ceiling = row_floor + 8;
+            const char *glyph;
+            if (level <= row_floor) {
+                glyph = " ";
+            } else if (level >= row_ceiling) {
+                glyph = LEVELS[7];
+            } else {
+                int sub_level = level - row_floor;
+                glyph = LEVELS[sub_level - 1];
+            }
+            size_t glyph_len = (glyph[0] == ' ') ? 1 : 3;
+
+            /* Only emit a color escape when the bucket changed since the
+             * last glyph WRITTEN to this row (not just this iteration) --
+             * keeps repeated/flat values cheap. Blank glyphs don't carry
+             * color at all (no point coloring whitespace), so they also
+             * don't update last_level_bucket, letting a real glyph right
+             * after a blank still emit its color. */
+            if (glyph[0] != ' ' && level != last_level_bucket[r]) {
+                size_t esc_len =
+                    write_color_escape(scheme, t, out_rows[r] + pos[r], out_cap - pos[r]);
+                pos[r] += esc_len;
+                last_level_bucket[r] = level;
+            }
+
+            if (pos[r] + glyph_len >= out_cap) continue;
+            memcpy(out_rows[r] + pos[r], glyph, glyph_len);
+            pos[r] += glyph_len;
+        }
+    }
+
+    /* Reset SGR state at the end of each row so the color doesn't bleed
+     * into whatever screen.c prints after the sparkline (row/col
+     * indicators etc. are plain, unstyled text). */
+    for (int r = 0; r < n_rows; r++) {
+        if (pos[r] + 4 < out_cap) {
+            memcpy(out_rows[r] + pos[r], "\x1b[0m", 4);
+            pos[r] += 4;
+        }
+        out_rows[r][pos[r]] = '\0';
+    }
 }
