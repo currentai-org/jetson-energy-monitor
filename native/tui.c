@@ -21,11 +21,16 @@
                                  as sampler.py's dev_last_voltage() */
 #define LOG_MAX_LINES 200
 /* Fixed rows above/below the log region: Mode/Channel line + CPU/GPU/RAM
- * line + 4 sparkline lines (label+value+glyphs each on one row) + 1 blank
- * separator + 1 footer. Kept as a named constant so
- * compute_log_visible_lines() and the fixed-row layout in render() can't
- * silently drift apart. */
-#define FIXED_CHROME_ROWS (2 + 4 + 1 + 1)
+ * line + 4 sparklines * SPARKLINE_ROWS rows each + 1 blank separator + 1
+ * footer. Kept as a named constant so compute_log_visible_lines() and
+ * the fixed-row layout in render() can't silently drift apart. */
+#define SPARKLINE_ROWS 2 /* stacked rows per sparkline -- see sparkline.h's
+                             sparkline_render_rows(): doubles the
+                             effective vertical resolution to 16 levels
+                             (2*8) versus a single 8-level row, at zero
+                             extra sampling/CPU cost (same data, just
+                             split across two lines of text). */
+#define FIXED_CHROME_ROWS (2 + 4 * SPARKLINE_ROWS + 1 + 1)
 #define LOG_VISIBLE_LINES_MIN 3  /* always show at least this many, even on
                                     a very short terminal */
 #define LOG_VISIBLE_LINES_DEFAULT 13 /* used before the first term_get_size()
@@ -305,35 +310,60 @@ static void render(TuiState *st, Screen *scr, int term_rows, int term_cols) {
         screen_set_line(scr, row++, "System: unavailable");
     }
 
-    /* --- Sparkline rows: label + value on one line, glyphs on the next
-     * (2 lines each -- more compact than the old 3-row Textual layout,
-     * still readable). --- */
-    int spark_width = term_cols - 20;
+    /* --- Sparkline rows: each metric gets SPARKLINE_ROWS stacked rows of
+     * glyphs (see sparkline.h's sparkline_render_rows() for how the
+     * levels are distributed bottom-up across rows) -- the label/value
+     * text sits on the FIRST row, left-padded blank on subsequent rows so
+     * the glyph columns still line up vertically. --- */
+    int label_width = 23; /* matches "Current (mA): %7.1f  " prefix length
+                              (14 + 7 digits + 2 spaces) so glyph columns
+                              across all 4 metrics line up vertically */
+    int spark_width = term_cols - label_width;
     if (spark_width < 10) spark_width = 10;
     if (spark_width > 200) spark_width = 200;
-    char spark_buf[700];
+
+    char spark_bufs[SPARKLINE_ROWS][700];
+    char *spark_rows[SPARKLINE_ROWS];
+    for (int r = 0; r < SPARKLINE_ROWS; r++) spark_rows[r] = spark_bufs[r];
 
     double latest_current_ma = have_latest ? latest.current_ma : 0.0;
     if (have_latest) sparkline_history_push(&st->hist_current, latest_current_ma);
-    sparkline_render(&st->hist_current, spark_width, spark_buf, sizeof(spark_buf));
-    screen_set_line(scr, row++, "Current (mA): %7.1f  %s", latest_current_ma, spark_buf);
+    sparkline_render_rows(&st->hist_current, spark_width, SPARKLINE_ROWS, spark_rows,
+                           sizeof(spark_bufs[0]));
+    screen_set_line(scr, row++, "Current (mA): %7.1f  %s", latest_current_ma, spark_rows[0]);
+    for (int r = 1; r < SPARKLINE_ROWS; r++) {
+        screen_set_line(scr, row++, "%-*s%s", label_width, "", spark_rows[r]);
+    }
 
     if (sys.ok) {
         sparkline_history_push(&st->hist_cpu, sys.cpu_percent);
         sparkline_history_push(&st->hist_gpu, sys.gpu_percent);
         if (sys.temp_c > -999.0) sparkline_history_push(&st->hist_temp, sys.temp_c);
     }
-    sparkline_render(&st->hist_cpu, spark_width, spark_buf, sizeof(spark_buf));
+
+    sparkline_render_rows(&st->hist_cpu, spark_width, SPARKLINE_ROWS, spark_rows,
+                           sizeof(spark_bufs[0]));
     screen_set_line(scr, row++, "CPU load (%%): %6.1f  %s", sys.ok ? sys.cpu_percent : 0.0,
-                     spark_buf);
+                     spark_rows[0]);
+    for (int r = 1; r < SPARKLINE_ROWS; r++) {
+        screen_set_line(scr, row++, "%-*s%s", label_width, "", spark_rows[r]);
+    }
 
-    sparkline_render(&st->hist_gpu, spark_width, spark_buf, sizeof(spark_buf));
+    sparkline_render_rows(&st->hist_gpu, spark_width, SPARKLINE_ROWS, spark_rows,
+                           sizeof(spark_bufs[0]));
     screen_set_line(scr, row++, "GPU load (%%): %6.1f  %s", sys.ok ? sys.gpu_percent : 0.0,
-                     spark_buf);
+                     spark_rows[0]);
+    for (int r = 1; r < SPARKLINE_ROWS; r++) {
+        screen_set_line(scr, row++, "%-*s%s", label_width, "", spark_rows[r]);
+    }
 
-    sparkline_render(&st->hist_temp, spark_width, spark_buf, sizeof(spark_buf));
+    sparkline_render_rows(&st->hist_temp, spark_width, SPARKLINE_ROWS, spark_rows,
+                           sizeof(spark_bufs[0]));
     screen_set_line(scr, row++, "Die temp (C): %6.1f  %s",
-                     (sys.ok && sys.temp_c > -999.0) ? sys.temp_c : 0.0, spark_buf);
+                     (sys.ok && sys.temp_c > -999.0) ? sys.temp_c : 0.0, spark_rows[0]);
+    for (int r = 1; r < SPARKLINE_ROWS; r++) {
+        screen_set_line(scr, row++, "%-*s%s", label_width, "", spark_rows[r]);
+    }
 
     /* --- Blank separator + log tail --- */
     screen_set_line(scr, row++, "%s", "");
