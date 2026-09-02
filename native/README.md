@@ -291,3 +291,57 @@ sparkline glyphs aren't split mid-byte).
   short-circuiting before the `--help` check ran) -- caught by manual
   testing, not by any automated test suite (none exists for this native
   code yet).
+
+## Vertical resolution: 2-row stacked sparklines + other options considered (2026-09-02)
+
+The 8 block-level glyphs (`▁`-`█`) give only 8 distinguishable heights
+per character cell. User asked to increase effective vertical resolution
+of the current/CPU/GPU/temp traces. Four approaches were considered:
+
+1. **Stack N rows per metric (chosen, N=2 implemented)** --
+   `sparkline_render_rows()` in `sparkline.{h,c}` distributes each
+   value's fill level bottom-up across N stacked terminal rows: row
+   `N-1` (bottom) covers the lowest 8 levels of the value's range, row
+   `N-2` the next 8, etc. This gives `N*8` distinguishable levels (16 at
+   N=2) using the exact same 8 glyphs, same underlying sample data, at
+   **zero extra CPU cost** -- confirmed via `wait4()`/`getrusage()`:
+   ~6.1% with 2-row sparklines vs. ~6.2% with 1-row, i.e. within noise.
+   The only cost is 1 extra terminal row per metric (4 extra rows total
+   for 4 metrics), which is why this shipped as a straightforward "N=2"
+   change rather than something more elaborate.
+2. **Braille dot-matrix characters (U+2800-U+28FF)** -- each cell is a
+   2x4 dot grid, giving 4 distinguishable vertical levels *per character*
+   (8 total dot positions, but typically used as 4 vertical steps per
+   column since sparklines plot one value per column) *and* effectively
+   2x the horizontal resolution too (2 sub-columns per cell), used by
+   libraries like `brailliant` and `isene/plot`. This is a genuinely
+   higher-resolution technique than stacked block rows, but non-trivial
+   to implement well: correctly rendering a *line* (not just point
+   samples) in dot-matrix form requires tracking dot state per sub-column
+   pair and connecting them, more code and more CPU per render than the
+   current one-glyph-per-sample-per-row approach. **Not implemented --
+   worth a follow-up if 16 levels (current 2-row scheme) still isn't
+   enough detail**, since it's the more work-intensive option of the two
+   viable choices.
+3. **ANSI 256-color foreground gradient on top of existing glyphs** -- a
+   genuinely free complementary technique: color the glyph based on
+   value (e.g. green/yellow/red thresholds, or a smooth gradient) using
+   `\x1b[38;5;Nm` before each glyph. Adds a second, continuous "channel"
+   of information (color intensity) on top of the existing 8/16-level
+   block height, at effectively zero CPU cost (a few extra bytes per
+   glyph in the same buffered write, no extra computation beyond a
+   threshold/gradient lookup already available from the value being
+   plotted anyway). **Not implemented** in this pass since it wasn't
+   explicitly asked for and changes the "plain block glyph" aesthetic,
+   but flagged here as the cheapest available option if more perceptual
+   depth is wanted without more rows.
+4. **Increasing SPARKLINE_HISTORY's time resolution (more UI ticks per
+   sample) or the glyph width** -- these affect *horizontal* resolution
+   (how much history is visible / how finely time is divided), not
+   vertical value resolution, so they don't address what was asked here;
+   noted only to rule them out as answers to this specific question.
+
+`SPARKLINE_ROWS` in `tui.c` is a single constant -- bumping it to 3 or 4
+is a one-line change if even more vertical detail is wanted later (each
++1 costs one more terminal row per metric, still no measurable CPU
+cost).
