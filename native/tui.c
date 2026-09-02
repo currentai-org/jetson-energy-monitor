@@ -316,13 +316,23 @@ static void render(TuiState *st, Screen *scr, int term_rows, int term_cols) {
      * glyphs (see sparkline.h's sparkline_render_rows() for how the
      * levels are distributed bottom-up across rows) -- the label/value
      * text sits on the FIRST row, left-padded blank on subsequent rows so
-     * the glyph columns still line up vertically. --- */
-    int label_width = 23; /* matches "Current (mA): %7.1f  " prefix length
-                              (14 + 7 digits + 2 spaces) so glyph columns
-                              across all 4 metrics line up vertically */
-    int spark_width = term_cols - label_width;
-    if (spark_width < 10) spark_width = 10;
-    if (spark_width > 200) spark_width = 200;
+     * the glyph columns still line up vertically. The pad width for
+     * continuation rows MUST equal the first row's actual printed prefix
+     * length -- computed per-metric via snprintf into a scratch buffer
+     * rather than a single hardcoded constant, since "%%" literal percent
+     * signs in the CPU/GPU format strings make their prefixes a
+     * different length than Current's (a bug found via a user screenshot:
+     * a stray `%%` collapsing to one `%` character shortened those three
+     * prefixes by 1 column vs. a hardcoded label_width=23, visibly
+     * shifting their top sparkline row left by one column relative to
+     * the bottom row). */
+    char prefix_buf[64];
+    int prefix_len;
+    int spark_width; /* recomputed per-metric from that metric's own
+                         actual prefix_len right below, so the sparkline
+                         always fills the terminal to the same right
+                         edge regardless of small prefix-length
+                         differences between metrics */
 
     char spark_bufs[SPARKLINE_ROWS][SPARKLINE_COLOR_ROW_CAP];
     char *spark_rows[SPARKLINE_ROWS];
@@ -330,12 +340,16 @@ static void render(TuiState *st, Screen *scr, int term_rows, int term_cols) {
 
     double latest_current_ma = have_latest ? latest.current_ma : 0.0;
     if (have_latest) sparkline_history_push(&st->hist_current, latest_current_ma);
+    prefix_len = snprintf(prefix_buf, sizeof(prefix_buf), "Current (mA): %7.1f  ", latest_current_ma);
+    spark_width = term_cols - prefix_len;
+    if (spark_width < 10) spark_width = 10;
+    if (spark_width > 200) spark_width = 200;
     sparkline_render_rows_color(&st->hist_current, spark_width, SPARKLINE_ROWS, spark_rows,
                                  sizeof(spark_bufs[0]),
                                  st->use_color ? &SPARKLINE_COLOR_CURRENT : NULL);
-    screen_set_line(scr, row++, "Current (mA): %7.1f  %s", latest_current_ma, spark_rows[0]);
+    screen_set_line(scr, row++, "%s%s", prefix_buf, spark_rows[0]);
     for (int r = 1; r < SPARKLINE_ROWS; r++) {
-        screen_set_line(scr, row++, "%-*s%s", label_width, "", spark_rows[r]);
+        screen_set_line(scr, row++, "%-*s%s", prefix_len, "", spark_rows[r]);
     }
 
     if (sys.ok) {
@@ -344,29 +358,41 @@ static void render(TuiState *st, Screen *scr, int term_rows, int term_cols) {
         if (sys.temp_c > -999.0) sparkline_history_push(&st->hist_temp, sys.temp_c);
     }
 
+    prefix_len = snprintf(prefix_buf, sizeof(prefix_buf), "CPU load (%%): %6.1f  ",
+                           sys.ok ? sys.cpu_percent : 0.0);
+    spark_width = term_cols - prefix_len;
+    if (spark_width < 10) spark_width = 10;
+    if (spark_width > 200) spark_width = 200;
     sparkline_render_rows_color(&st->hist_cpu, spark_width, SPARKLINE_ROWS, spark_rows,
                                  sizeof(spark_bufs[0]), st->use_color ? &SPARKLINE_COLOR_CPU : NULL);
-    screen_set_line(scr, row++, "CPU load (%%): %6.1f  %s", sys.ok ? sys.cpu_percent : 0.0,
-                     spark_rows[0]);
+    screen_set_line(scr, row++, "%s%s", prefix_buf, spark_rows[0]);
     for (int r = 1; r < SPARKLINE_ROWS; r++) {
-        screen_set_line(scr, row++, "%-*s%s", label_width, "", spark_rows[r]);
+        screen_set_line(scr, row++, "%-*s%s", prefix_len, "", spark_rows[r]);
     }
 
+    prefix_len = snprintf(prefix_buf, sizeof(prefix_buf), "GPU load (%%): %6.1f  ",
+                           sys.ok ? sys.gpu_percent : 0.0);
+    spark_width = term_cols - prefix_len;
+    if (spark_width < 10) spark_width = 10;
+    if (spark_width > 200) spark_width = 200;
     sparkline_render_rows_color(&st->hist_gpu, spark_width, SPARKLINE_ROWS, spark_rows,
                                  sizeof(spark_bufs[0]), st->use_color ? &SPARKLINE_COLOR_GPU : NULL);
-    screen_set_line(scr, row++, "GPU load (%%): %6.1f  %s", sys.ok ? sys.gpu_percent : 0.0,
-                     spark_rows[0]);
+    screen_set_line(scr, row++, "%s%s", prefix_buf, spark_rows[0]);
     for (int r = 1; r < SPARKLINE_ROWS; r++) {
-        screen_set_line(scr, row++, "%-*s%s", label_width, "", spark_rows[r]);
+        screen_set_line(scr, row++, "%-*s%s", prefix_len, "", spark_rows[r]);
     }
 
+    prefix_len = snprintf(prefix_buf, sizeof(prefix_buf), "Die temp (C): %6.1f  ",
+                           (sys.ok && sys.temp_c > -999.0) ? sys.temp_c : 0.0);
+    spark_width = term_cols - prefix_len;
+    if (spark_width < 10) spark_width = 10;
+    if (spark_width > 200) spark_width = 200;
     sparkline_render_rows_color(&st->hist_temp, spark_width, SPARKLINE_ROWS, spark_rows,
                                  sizeof(spark_bufs[0]),
                                  st->use_color ? &SPARKLINE_COLOR_TEMP : NULL);
-    screen_set_line(scr, row++, "Die temp (C): %6.1f  %s",
-                     (sys.ok && sys.temp_c > -999.0) ? sys.temp_c : 0.0, spark_rows[0]);
+    screen_set_line(scr, row++, "%s%s", prefix_buf, spark_rows[0]);
     for (int r = 1; r < SPARKLINE_ROWS; r++) {
-        screen_set_line(scr, row++, "%-*s%s", label_width, "", spark_rows[r]);
+        screen_set_line(scr, row++, "%-*s%s", prefix_len, "", spark_rows[r]);
     }
 
     /* --- Blank separator + log tail --- */
