@@ -18,7 +18,7 @@
 
 #include <stddef.h>
 
-#define SCREEN_MAX_LINES 32
+#define SCREEN_MAX_LINES 64
 #define SCREEN_LINE_CAP 512 /* bytes per line, generous for UTF-8 sparkline rows */
 
 typedef struct {

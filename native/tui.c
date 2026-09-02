@@ -20,7 +20,20 @@
 #define VOLTAGE_POLL_HZ 1.0  /* throttled bus-voltage read, same rationale
                                  as sampler.py's dev_last_voltage() */
 #define LOG_MAX_LINES 200
-#define LOG_VISIBLE_LINES 13 /* how many of the most recent lines to show */
+/* Fixed rows above/below the log region: Mode/Channel line + CPU/GPU/RAM
+ * line + 4 sparkline lines (label+value+glyphs each on one row) + 1 blank
+ * separator + 1 footer. Kept as a named constant so
+ * compute_log_visible_lines() and the fixed-row layout in render() can't
+ * silently drift apart. */
+#define FIXED_CHROME_ROWS (2 + 4 + 1 + 1)
+#define LOG_VISIBLE_LINES_MIN 3  /* always show at least this many, even on
+                                    a very short terminal */
+#define LOG_VISIBLE_LINES_DEFAULT 13 /* used before the first term_get_size()
+                                        call, and as a floor/typical value */
+/* Hard cap: must leave room for FIXED_CHROME_ROWS within SCREEN_MAX_LINES
+ * (screen.h), and bounds the on-stack `recent[]` scratch array in
+ * render(). */
+#define LOG_VISIBLE_LINES_MAX (SCREEN_MAX_LINES - FIXED_CHROME_ROWS - 2)
 
 static volatile sig_atomic_t g_tui_stop = 0;
 
@@ -225,9 +238,22 @@ static void poll_keyboard(TuiState *st) {
 
 static const char *channel_label(int channel) { return ina3221_channel_name(channel); }
 
-static void render(TuiState *st, Screen *scr, int term_cols) {
+/* Computes how many log lines can be shown given the terminal's current
+ * row count, so the log region grows/shrinks with the window instead of
+ * a fixed constant -- reserves FIXED_CHROME_ROWS for the status/sparkline/
+ * footer rows and clamps to [LOG_VISIBLE_LINES_MIN, LOG_VISIBLE_LINES_MAX]
+ * so a very short or very tall terminal still renders sensibly. */
+static int compute_log_visible_lines(int term_rows) {
+    int available = term_rows - FIXED_CHROME_ROWS;
+    if (available < LOG_VISIBLE_LINES_MIN) return LOG_VISIBLE_LINES_MIN;
+    if (available > LOG_VISIBLE_LINES_MAX) return LOG_VISIBLE_LINES_MAX;
+    return available;
+}
+
+static void render(TuiState *st, Screen *scr, int term_rows, int term_cols) {
     screen_begin_frame(scr);
     screen_set_term_width(scr, term_cols);
+    int log_visible_lines = compute_log_visible_lines(term_rows);
 
     int row = 0;
 
@@ -311,8 +337,8 @@ static void render(TuiState *st, Screen *scr, int term_cols) {
 
     /* --- Blank separator + log tail --- */
     screen_set_line(scr, row++, "%s", "");
-    const char *recent[LOG_VISIBLE_LINES];
-    int n_recent = tui_log_recent(&st->log, recent, LOG_VISIBLE_LINES);
+    const char *recent[LOG_VISIBLE_LINES_MAX];
+    int n_recent = tui_log_recent(&st->log, recent, log_visible_lines);
     for (int i = 0; i < n_recent; i++) {
         screen_set_line(scr, row++, "%s", recent[i]);
     }
@@ -387,7 +413,7 @@ int run_tui(Ina3221 *dev, Sampler *sampler, SysMonitor *sysmon, int channel) {
 
         int rows, cols;
         term_get_size(&rows, &cols);
-        render(&st, &scr, cols);
+        render(&st, &scr, rows, cols);
 
         double elapsed = now_monotonic() - tick_start;
         double remaining = period - elapsed;
