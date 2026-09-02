@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 .uv_cache/
 *.egg-info/
+native/ina_bench
+native/*.o
+native/*.csv
