@@ -20,7 +20,7 @@
 #define VOLTAGE_POLL_HZ 1.0  /* throttled bus-voltage read, same rationale
                                  as sampler.py's dev_last_voltage() */
 #define LOG_MAX_LINES 200
-#define LOG_VISIBLE_LINES 8 /* how many of the most recent lines to show */
+#define LOG_VISIBLE_LINES 13 /* how many of the most recent lines to show */
 
 static volatile sig_atomic_t g_tui_stop = 0;
 
