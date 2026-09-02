@@ -174,7 +174,7 @@ C rewrite.
   porting to a different Jetson board/carrier, verify this against that
   board's schematic before trusting absolute current values (the achieved
   sample *rate* is independent of this constant, but mA/mWh accuracy is
-  not) — see `ina3221.h`'s `SHUNT_OHMS` constant in `main.c`.
+  not) — see `ina3221.h`'s `SHUNT_OHMS` constant in `src/main.c`.
 - **Channel 1 (VDD_IN)** = total board input power, i.e. everything
   downstream of the barrel jack / USB-C PD input — the default, and what
   "energy efficiency of the whole board" tests should use. Channels 2/3
@@ -189,21 +189,24 @@ C rewrite.
 
 ## Architecture
 
+All source lives in `src/`; `make` builds it into `build/` (gitignored)
+and links the final `jeu` binary at the repo root.
+
 | File(s)            | Purpose |
 |---------------------|---------|
-| `ina3221.h/.c`       | Raw INA3221 register driver (config word encode/decode, shunt/bus voltage register reads, single-channel fast-mode helper). |
-| `sampler.h/.c`       | Background thread sampling current at a target rate into a preallocated ring buffer, using `clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, ...)` for absolute-deadline pacing to minimize jitter. |
-| `sysinfo.h/.c`       | Reads CPU/GPU/RAM/swap/fan/temp directly from `/proc` and `/sys` — no `jtop`/`jetson-stats` dependency. |
-| `sysmon.h/.c`        | Background poll thread wrapping `sysinfo.c`, plus a test-window sample recorder/summarizer. |
-| `csv_log.h/.c`       | Per-sample and per-test-window sysinfo CSV writers (buffered, batched I/O). |
-| `jsonl_log.h/.c`     | Hand-rolled minimal JSON writer appending to `results.jsonl`. |
-| `tests.h/.c`         | Baseline-test and start/stop `EnergyCapture` logic, including trapezoidal mWh/mAh integration. |
-| `term.h/.c`          | Raw/cbreak terminal mode, alternate screen buffer, cursor show/hide, terminal-size query. |
-| `sparkline.h/.c`     | Unicode block-glyph sparklines (8-level, optionally stacked across rows for more vertical resolution) with optional truecolor gradients. |
-| `screen.h/.c`        | Fixed-row, double-buffered terminal renderer — only repaints lines that actually changed since the last frame. |
-| `tui.h/.c`           | Interactive TUI application state, render loop, and keybindings. |
-| `main.c`             | CLI argument parsing and mode dispatch (`tui`/`baseline`/`energy`). |
-| `ina_bench.c`        | Standalone I2C-sampling benchmark used as a performance reference point during development — see `docs/DEVLOG.md`. Not part of the `jeu` binary; build with `make bench`. |
+| `src/ina3221.h/.c`       | Raw INA3221 register driver (config word encode/decode, shunt/bus voltage register reads, single-channel fast-mode helper). |
+| `src/sampler.h/.c`       | Background thread sampling current at a target rate into a preallocated ring buffer, using `clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, ...)` for absolute-deadline pacing to minimize jitter. |
+| `src/sysinfo.h/.c`       | Reads CPU/GPU/RAM/swap/fan/temp directly from `/proc` and `/sys` — no `jtop`/`jetson-stats` dependency. |
+| `src/sysmon.h/.c`        | Background poll thread wrapping `sysinfo.c`, plus a test-window sample recorder/summarizer. |
+| `src/csv_log.h/.c`       | Per-sample and per-test-window sysinfo CSV writers (buffered, batched I/O). |
+| `src/jsonl_log.h/.c`     | Hand-rolled minimal JSON writer appending to `results.jsonl`. |
+| `src/tests.h/.c`         | Baseline-test and start/stop `EnergyCapture` logic, including trapezoidal mWh/mAh integration. |
+| `src/term.h/.c`          | Raw/cbreak terminal mode, alternate screen buffer, cursor show/hide, terminal-size query. |
+| `src/sparkline.h/.c`     | Unicode block-glyph sparklines (8-level, optionally stacked across rows for more vertical resolution) with optional truecolor gradients. |
+| `src/screen.h/.c`        | Fixed-row, double-buffered terminal renderer — only repaints lines that actually changed since the last frame. |
+| `src/tui.h/.c`           | Interactive TUI application state, render loop, and keybindings. |
+| `src/main.c`             | CLI argument parsing and mode dispatch (`tui`/`baseline`/`energy`). |
+| `src/ina_bench.c`        | Standalone I2C-sampling benchmark used as a performance reference point during development — see `docs/DEVLOG.md`. Not part of the `jeu` binary; build with `make bench`. |
 
 ## Contributing
 

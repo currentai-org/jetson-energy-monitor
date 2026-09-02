@@ -3,9 +3,9 @@
 ## Building
 
 ```bash
-make          # builds ./jeu
+make          # builds ./jeu (source in src/, object files in build/)
 make bench    # also builds ./ina_bench, the standalone sampling benchmark
-make clean    # removes build artifacts
+make clean    # removes build/, ./jeu, ./ina_bench
 ```
 
 No external dependencies beyond `gcc`/`clang`, `make`, and the C standard
