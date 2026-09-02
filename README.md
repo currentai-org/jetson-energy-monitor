@@ -114,7 +114,8 @@ python src/app.py
 ### Command-line flags
 
 ```
-usage: jetson-energy-usage [-h] [--sample-hz HZ] [--sysinfo-hz HZ] [--channel NAME] [--no-plots]
+usage: jetson-energy-usage [-h] [--sample-hz HZ] [--sysinfo-hz HZ] [--channel NAME]
+                            [--no-plots] [--headless TEST] [--duration SECONDS]
 
   --sample-hz HZ     Target INA3221 current sampling rate in Hz (default: 1000).
                       Measured achievable rate on pocket-infer-6a8f is ~1600 Hz
@@ -130,10 +131,19 @@ usage: jetson-energy-usage [-h] [--sample-hz HZ] [--sysinfo-hz HZ] [--channel NA
                       (SoC rail). Default: VDD_IN. (Prior to 2026-08-31 this took
                       a raw channel number 1/2/3; see ina3221.py's CHANNEL_NAMES
                       for the underlying mapping if you need it.)
-  --no-plots          Disable the live current and CPU/GPU sparklines entirely.
-                      Status bars, keybindings, and CSV/JSONL logging are
-                      unaffected -- only the Sparkline widgets are skipped.
-                      Use this for the lowest possible UI overhead.
+  --no-plots          TUI mode only: disable the live current and CPU/GPU
+                      sparklines entirely. Status bars, keybindings, and
+                      CSV/JSONL logging are unaffected -- only the Sparkline
+                      widgets are skipped. Use this for the lowest possible
+                      TUI overhead. Ignored with --headless (see below).
+  --headless TEST     Run a single test with NO TUI at all -- no Textual
+                      import, no live sensor readouts on screen, just a short
+                      status line while the test runs and a human-readable
+                      summary at the end. TEST is 'baseline' or 'energy'.
+                      See "Headless CLI mode" below.
+  --duration SECONDS  Duration for '--headless baseline' (default: 10). Ignored
+                      for '--headless energy' (stops on keypress/Ctrl-C) and
+                      for the TUI (its 'b' keybinding is a fixed 10s).
 ```
 
 Example: `uv run python src/app.py --sample-hz 500 --sysinfo-hz 1` for a
@@ -144,6 +154,43 @@ VDD_CPU_GPU` to isolate the CPU+GPU rail instead of total board power.
 The status bar's "Channel:" field always shows which rail is currently
 being sampled, so it's clear at a glance even without checking how the app
 was launched.
+
+### Headless CLI mode (2026-09-02)
+
+For running alongside the user's own application with as little overhead
+as possible -- no TUI, no live sensor output, not even a Textual import --
+use `--headless baseline` or `--headless energy`:
+
+```bash
+# Baseline: waits 10s (or --duration N) collecting idle current, then reports.
+uv run python src/app.py --headless baseline
+uv run python src/app.py --headless baseline --duration 30
+
+# Energy: starts capturing immediately; press any key to stop and report.
+# (Falls back to Ctrl-C if stdin isn't an interactive terminal, e.g. when
+# run from a script with redirected/piped stdin.)
+uv run python src/app.py --headless energy
+```
+
+Both modes print only a one-line "started, collecting..." status message
+before the test and the same human-readable summary the TUI's log widget
+shows after (mean current, min/max, bus voltage, mean power, energy for
+the energy test, CPU/GPU/temp avg/max, and the CSV/sysinfo-CSV/JSONL file
+paths) -- no sparklines, no periodic sensor printouts, no Rich/Textual
+rendering at all. The same `--sample-hz`/`--sysinfo-hz`/`--channel` flags
+apply. Output files (per-sample CSV, sysinfo CSV, and the shared
+`results.jsonl`) are identical in format to what the TUI produces --
+`--headless` only changes the front end, not what gets recorded.
+
+Implementation note: `run_tui()` and every Textual-specific class
+(StatusPanel/SysPanel/EnergyApp) live *inside* that function in `app.py`,
+not at module scope -- so `--headless` mode never imports `textual` at
+all, confirmed via `'textual' not in sys.modules` after a full headless
+test run. `run_headless()` reuses the exact same `Sampler`/`SysMonitor`/
+`run_baseline_test()`/`EnergyCapture` classes the TUI uses; only the
+front-end (what gets printed, and how the energy test's stop signal is
+delivered -- a keypress via a raw/cbreak terminal instead of a Textual
+keybinding) differs.
 
 No `sudo` needed as long as your user is in the `i2c` group:
 
