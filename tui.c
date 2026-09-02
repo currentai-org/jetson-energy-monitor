@@ -111,6 +111,18 @@ typedef struct {
     EnergyCapture energy;
     int energy_armed;
 
+    /* Comment prompt (triggered by 'e'): while prompting_comment is set,
+     * keystrokes build up comment_input instead of being dispatched as
+     * normal hotkeys (see handle_comment_key()). Confirmed with Enter,
+     * skipped (armed with no comment) with Esc. The confirmed/skipped
+     * text is copied into armed_comment, which is consumed (and cleared)
+     * the next time 'space' starts an energy capture -- one-shot, as
+     * requested: it applies only to that one test run. */
+    int prompting_comment;
+    char comment_input[256];
+    int comment_input_len;
+    char armed_comment[256];
+
     double cached_voltage;
     double last_voltage_read_t;
     int have_cached_voltage;
@@ -140,13 +152,16 @@ static double tui_dev_last_voltage(TuiState *st) {
 
 static void *baseline_worker_main(void *arg) {
     TuiState *st = (TuiState *)arg;
-    run_baseline_test(st->sampler, st->dev, st->sysmon, 10.0, &st->baseline_result);
+    run_baseline_test(st->sampler, st->dev, st->sysmon, 10.0, NULL, &st->baseline_result);
     st->baseline_done_flag = 1;
     return NULL;
 }
 
 static void log_test_result_lines(TuiState *st, const TestResult *r) {
     tui_log_write(&st->log, "%s", r->name);
+    if (r->has_comment && r->comment[0]) {
+        tui_log_write(&st->log, "  comment:       %s", r->comment);
+    }
     tui_log_write(&st->log, "  duration:      %.3f s", r->duration_s);
     tui_log_write(&st->log, "  samples:       %ld  (~%.0f Hz)", r->n_samples, r->achieved_hz);
     tui_log_write(&st->log, "  mean current:  %.1f mA", r->mean_current_ma);
@@ -172,7 +187,48 @@ static void log_test_result_lines(TuiState *st, const TestResult *r) {
     if (r->jsonl_path) tui_log_write(&st->log, "  logged to:     %s", r->jsonl_path);
 }
 
+/* Handles a keystroke while the comment prompt is active (triggered by
+ * 'e' -- see the TuiState.prompting_comment field comment). Printable
+ * ASCII is appended to comment_input; Backspace/DEL removes the last
+ * character; Enter confirms (arms the energy test with whatever text was
+ * typed, possibly empty) and Esc cancels the prompt (arms with no
+ * comment) -- either way this leaves the normal 'e'-armed state so
+ * SPACE still starts the capture as usual. */
+static void handle_comment_key(TuiState *st, char key) {
+    if (key == '\r' || key == '\n') { /* Enter: confirm */
+        st->comment_input[st->comment_input_len] = '\0';
+        snprintf(st->armed_comment, sizeof(st->armed_comment), "%s", st->comment_input);
+        st->prompting_comment = 0;
+        st->energy_armed = 1;
+        snprintf(st->mode, sizeof(st->mode), "ENERGY TEST ARMED (space to start)");
+        if (st->armed_comment[0]) {
+            tui_log_write(&st->log, "Energy test armed with comment: \"%s\"", st->armed_comment);
+        } else {
+            tui_log_write(&st->log, "Energy test armed (no comment). Press SPACE to start.");
+        }
+    } else if (key == 0x1b) { /* Esc: cancel -- arm with no comment */
+        st->armed_comment[0] = '\0';
+        st->prompting_comment = 0;
+        st->energy_armed = 1;
+        snprintf(st->mode, sizeof(st->mode), "ENERGY TEST ARMED (space to start)");
+        tui_log_write(&st->log, "Comment skipped. Energy test armed. Press SPACE to start.");
+    } else if (key == 0x7f || key == 0x08) { /* Backspace/DEL */
+        if (st->comment_input_len > 0) st->comment_input_len--;
+    } else if ((unsigned char)key >= 0x20 && (unsigned char)key < 0x7f) { /* printable ASCII */
+        if ((size_t)st->comment_input_len + 1 < sizeof(st->comment_input)) {
+            st->comment_input[st->comment_input_len++] = key;
+        }
+    }
+    /* Other control bytes (arrow keys, etc.) are silently ignored while
+     * prompting -- this is a plain single-line text field, not a full
+     * line editor. */
+}
+
 static void handle_key(TuiState *st, char key) {
+    if (st->prompting_comment) {
+        handle_comment_key(st, key);
+        return;
+    }
     switch (key) {
         case 'b':
         case 'B':
@@ -196,14 +252,17 @@ static void handle_key(TuiState *st, char key) {
                 tui_log_write(&st->log, "[!] Energy capture already active.");
                 break;
             }
-            st->energy_armed = 1;
-            snprintf(st->mode, sizeof(st->mode), "ENERGY TEST ARMED (space to start)");
-            tui_log_write(&st->log, "Energy test armed. Press SPACE to start capturing.");
+            st->prompting_comment = 1;
+            st->comment_input[0] = '\0';
+            st->comment_input_len = 0;
+            snprintf(st->mode, sizeof(st->mode), "ENTER COMMENT (Enter=ok, Esc=skip)");
+            tui_log_write(&st->log, "Type a comment for this run, then Enter (or Esc to skip).");
             break;
         case ' ':
             if (st->baseline_running) break;
             if (!st->energy.active) {
-                energy_capture_start(&st->energy);
+                energy_capture_start(&st->energy, st->armed_comment);
+                st->armed_comment[0] = '\0'; /* one-shot: consumed now */
                 snprintf(st->mode, sizeof(st->mode), "ENERGY CAPTURE ACTIVE (space to stop)");
                 tui_log_write(&st->log, "Energy capture started.");
             } else {
@@ -288,30 +347,39 @@ static void render(TuiState *st, Screen *scr, int term_rows, int term_cols) {
                          mode_display, channel_label(st->channel), voltage, stats.achieved_hz);
     }
 
-    /* --- Row 1: CPU/GPU/RAM/Swap/Fan/Temp --- */
+    /* --- Row 1: CPU/GPU/RAM/Swap/Fan/Temp -- OR, while the comment
+     * prompt is active, the live comment-input line instead. Reusing
+     * this row (rather than adding a new one) keeps FIXED_CHROME_ROWS
+     * exact regardless of prompt state. `sys` is read here regardless of
+     * prompt state (used below to feed the sparkline history), just not
+     * displayed while prompting. */
     SysSnapshot sys;
     sysmon_get_latest(st->sysmon, &sys);
-    if (sys.ok) {
-        char fan_str[32];
-        if (sys.fan_rpm >= 0) {
-            snprintf(fan_str, sizeof(fan_str), "%.0f RPM", sys.fan_rpm);
-        } else {
-            snprintf(fan_str, sizeof(fan_str), "--");
-        }
-        char temp_str[32];
-        if (sys.temp_c > -999.0) {
-            snprintf(temp_str, sizeof(temp_str), "%.1f C", sys.temp_c);
-        } else {
-            snprintf(temp_str, sizeof(temp_str), "--");
-        }
-        screen_set_line(scr, row++,
-                         "CPU: %5.1f%%   GPU: %5.1f%%   RAM: %6.0f/%.0f MB (%4.1f%%)   Swap: "
-                         "%6.0f/%.0f MB (%4.1f%%)   Fan: %-10s Die temp: %s",
-                         sys.cpu_percent, sys.gpu_percent, sys.ram_used_mb, sys.ram_total_mb,
-                         sys.ram_percent, sys.swap_used_mb, sys.swap_total_mb, sys.swap_percent,
-                         fan_str, temp_str);
+    if (st->prompting_comment) {
+        screen_set_line(scr, row++, "Comment: %s_", st->comment_input);
     } else {
-        screen_set_line(scr, row++, "System: unavailable");
+        if (sys.ok) {
+            char fan_str[32];
+            if (sys.fan_rpm >= 0) {
+                snprintf(fan_str, sizeof(fan_str), "%.0f RPM", sys.fan_rpm);
+            } else {
+                snprintf(fan_str, sizeof(fan_str), "--");
+            }
+            char temp_str[32];
+            if (sys.temp_c > -999.0) {
+                snprintf(temp_str, sizeof(temp_str), "%.1f C", sys.temp_c);
+            } else {
+                snprintf(temp_str, sizeof(temp_str), "--");
+            }
+            screen_set_line(scr, row++,
+                             "CPU: %5.1f%%   GPU: %5.1f%%   RAM: %6.0f/%.0f MB (%4.1f%%)   Swap: "
+                             "%6.0f/%.0f MB (%4.1f%%)   Fan: %-10s Die temp: %s",
+                             sys.cpu_percent, sys.gpu_percent, sys.ram_used_mb, sys.ram_total_mb,
+                             sys.ram_percent, sys.swap_used_mb, sys.swap_total_mb,
+                             sys.swap_percent, fan_str, temp_str);
+        } else {
+            screen_set_line(scr, row++, "System: unavailable");
+        }
     }
 
     /* --- Sparkline rows: each metric gets SPARKLINE_ROWS stacked rows of
@@ -406,9 +474,13 @@ static void render(TuiState *st, Screen *scr, int term_rows, int term_cols) {
     }
 
     /* --- Footer: keybindings --- */
-    screen_set_line(scr, row++,
-                     "%s",
-                     "b: baseline(10s)  e: arm energy  space: start/stop  r: reset  q: quit");
+    if (st->prompting_comment) {
+        screen_set_line(scr, row++, "%s", "Type your comment, Enter to confirm, Esc to skip");
+    } else {
+        screen_set_line(scr, row++,
+                         "%s",
+                         "b: baseline(10s)  e: arm energy  space: start/stop  r: reset  q: quit");
+    }
 
     screen_flush(scr);
 }

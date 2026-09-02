@@ -82,6 +82,10 @@ usage: ./jeu [tui|baseline|energy] [--hz N] [--duration SEC] [--channel NAME]
   --channel NAME     INA3221 rail to sample: VDD_IN, VDD_CPU_GPU, or VDD_SOC
                      (default VDD_IN).
   --sysinfo-hz N     Poll rate in Hz for CPU/GPU/RAM/swap/fan/temp (default 2).
+  --comment TEXT     Attach a one-off note to this run's result (console
+                     summary and JSONL log). Applies only to this single
+                     'baseline'/'energy' invocation. Ignored for 'tui' (use
+                     the 'e' keybinding's prompt there instead).
   --color            Force-enable truecolor sparkline gradients in 'tui' mode.
                      On by default when stdout is a terminal and NO_COLOR/
                      TERM=dumb aren't set.
@@ -95,7 +99,7 @@ usage: ./jeu [tui|baseline|energy] [--hz N] [--duration SEC] [--channel NAME]
 | Key     | Action |
 |---------|--------|
 | `b`     | Run a **baseline (idle) power test** (10s, averages current). |
-| `e`     | **Arm** the energy-usage test (informational; `space` works either way). |
+| `e`     | Prompt for an optional one-line **comment**, then **arm** the energy-usage test (`space` works either way once armed). Type your note and press Enter to confirm, or Esc to skip. The comment is attached to that one energy-test result only — it's cleared automatically afterward, so the next capture starts with no comment unless you press `e` again. |
 | `space` | **Start/stop** an energy capture. On stop, integrates current × time (trapezoidal rule) over the window to report mWh / mAh consumed, plus mean/min/max current and achieved sample rate. |
 | `r`     | Clear the live sparkline history. |
 | `q`     | Quit (restores original INA3221 config). |
@@ -113,6 +117,10 @@ overhead — no TUI, no live sensor output on screen at all:
 # (falls back to Ctrl-C if stdin isn't an interactive terminal, e.g. run
 # from a script with redirected/piped stdin).
 ./jeu energy --hz 1000 --channel VDD_IN
+
+# Attach a note to a specific run -- shows up in the console summary and
+# as a "comment" field in results.jsonl. One-off, applies to this run only.
+./jeu baseline --duration 30 --comment "after fan curve change"
 ```
 
 Both modes print only a one-line "started, collecting..." status message
@@ -136,7 +144,9 @@ back to `~/.cache/jetson-energy-usage`):
   fields (e.g. only `energy` has `mwh`/`mah`) — key off `test_type` rather
   than assuming a fixed schema. Each record also carries sampler
   jitter/rate stats, device config (channel, shunt resistance, I2C
-  address), and system-resource summary stats over the test window.
+  address), system-resource summary stats over the test window, and an
+  optional `comment` field (`null` if none was given for that run — see
+  `--comment` above / the TUI's `e` keybinding).
 
 ## Performance
 

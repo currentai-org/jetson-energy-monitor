@@ -64,6 +64,9 @@ void test_result_free(TestResult *r) {
 
 void test_result_print_summary(const TestResult *r) {
     printf("%s\n", r->name);
+    if (r->has_comment && r->comment[0]) {
+        printf("  comment:       %s\n", r->comment);
+    }
     printf("  duration:      %.3f s\n", r->duration_s);
     printf("  samples:       %ld  (~%.0f Hz)\n", r->n_samples, r->achieved_hz);
     printf("  mean current:  %.1f mA\n", r->mean_current_ma);
@@ -108,6 +111,8 @@ static void log_result_jsonl(const char *test_type, TestResult *result, Sampler 
     in.has_energy = result->has_energy;
     in.mwh = result->mwh;
     in.mah = result->mah;
+    in.has_comment = result->has_comment;
+    in.comment = (result->has_comment && result->comment[0]) ? result->comment : NULL;
     in.csv_path = result->csv_path;
 
     in.sampler_target_hz = 1.0 / sampler->target_period_s;
@@ -129,7 +134,7 @@ static void log_result_jsonl(const char *test_type, TestResult *result, Sampler 
 }
 
 void run_baseline_test(Sampler *sampler, Ina3221 *dev, SysMonitor *sysmon, double duration_s,
-                       TestResult *out) {
+                       const char *comment, TestResult *out) {
     memset(out, 0, sizeof(*out));
 
     SampleList discard;
@@ -179,6 +184,10 @@ void run_baseline_test(Sampler *sampler, Ina3221 *dev, SysMonitor *sysmon, doubl
     out->bus_voltage_v = bus_v;
     out->mean_power_mw = mean_power_mw;
     out->has_energy = 0;
+    if (comment && comment[0]) {
+        out->has_comment = 1;
+        snprintf(out->comment, sizeof(out->comment), "%s", comment);
+    }
     out->csv_path = csv_path;
     out->sysinfo_csv_path = sysinfo_csv_path;
     if (have_sys_rec) {
@@ -207,7 +216,7 @@ void energy_capture_free(EnergyCapture *ec) {
     if (ec->has_sys_rec) sys_recorder_free(&ec->sys_rec);
 }
 
-void energy_capture_start(EnergyCapture *ec) {
+void energy_capture_start(EnergyCapture *ec, const char *comment) {
     SampleList discard;
     sample_list_init(&discard);
     sampler_drain(ec->sampler, &discard);
@@ -216,6 +225,13 @@ void energy_capture_start(EnergyCapture *ec) {
     sample_list_free(&ec->samples);
     sample_list_init(&ec->samples);
     ec->active = 1;
+    if (comment && comment[0]) {
+        ec->has_comment = 1;
+        snprintf(ec->comment, sizeof(ec->comment), "%s", comment);
+    } else {
+        ec->has_comment = 0;
+        ec->comment[0] = '\0';
+    }
     if (ec->has_sys_rec) sys_recorder_start(&ec->sys_rec);
 }
 
@@ -270,6 +286,10 @@ void energy_capture_stop(EnergyCapture *ec, TestResult *out) {
     out->has_energy = 1;
     out->mwh = mwh;
     out->mah = mah;
+    if (ec->has_comment && ec->comment[0]) {
+        out->has_comment = 1;
+        snprintf(out->comment, sizeof(out->comment), "%s", ec->comment);
+    }
     out->csv_path = csv_path;
     out->sysinfo_csv_path = sysinfo_csv_path;
     if (ec->has_sys_rec) {
@@ -278,4 +298,9 @@ void energy_capture_stop(EnergyCapture *ec, TestResult *out) {
     }
 
     log_result_jsonl("energy", out, ec->sampler, ec->dev, -1.0);
+
+    /* Comment is one-shot: clear it now so a subsequent start (without an
+     * explicit new comment) doesn't silently reuse this one. */
+    ec->has_comment = 0;
+    ec->comment[0] = '\0';
 }

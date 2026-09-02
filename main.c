@@ -98,6 +98,10 @@ static void print_usage(const char *prog) {
             "  --channel NAME     INA3221 rail to sample: VDD_IN, VDD_CPU_GPU, or VDD_SOC\n"
             "                     (default VDD_IN).\n"
             "  --sysinfo-hz N     Poll rate in Hz for CPU/GPU/RAM/swap/fan/temp (default %.0f).\n"
+            "  --comment TEXT     Attach a one-off note to this run's result (TUI/JSONL log\n"
+            "                     and console summary). Applies only to this single\n"
+            "                     'baseline'/'energy' invocation. Ignored for 'tui' (use the\n"
+            "                     'e' keybinding's prompt there instead).\n"
             "  --color            Force-enable truecolor sparkline gradients in 'tui' mode\n"
             "                     (green->per-metric color: current=yellow, cpu=cyan,\n"
             "                     gpu=magenta, temp=red). On by default when stdout is a\n"
@@ -148,6 +152,7 @@ int main(int argc, char **argv) {
     double sysinfo_hz = DEFAULT_SYSINFO_HZ;
     double duration_s = DEFAULT_DURATION_S;
     char channel_name_buf[32] = "VDD_IN";
+    char comment_buf[256] = "";
     int use_color = default_color_enabled(); /* may be overridden below */
 
     for (int i = arg_start; i < argc; i++) {
@@ -159,6 +164,8 @@ int main(int argc, char **argv) {
             snprintf(channel_name_buf, sizeof(channel_name_buf), "%s", argv[++i]);
         } else if (strcmp(argv[i], "--sysinfo-hz") == 0 && i + 1 < argc) {
             sysinfo_hz = atof(argv[++i]);
+        } else if (strcmp(argv[i], "--comment") == 0 && i + 1 < argc) {
+            snprintf(comment_buf, sizeof(comment_buf), "%s", argv[++i]);
         } else if (strcmp(argv[i], "--color") == 0) {
             use_color = 1;
         } else if (strcmp(argv[i], "--no-color") == 0) {
@@ -226,11 +233,11 @@ int main(int argc, char **argv) {
     TestResult result;
     if (strcmp(test, "baseline") == 0) {
         printf("Baseline (idle) test on %s: collecting for %.0fs...\n", chan_label, duration_s);
-        run_baseline_test(&sampler, &dev, &sysmon, duration_s, &result);
+        run_baseline_test(&sampler, &dev, &sysmon, duration_s, comment_buf, &result);
     } else {
         EnergyCapture ec;
         energy_capture_init(&ec, &sampler, &dev, &sysmon);
-        energy_capture_start(&ec);
+        energy_capture_start(&ec, comment_buf);
 
         int stdin_is_tty = isatty(STDIN_FILENO);
         if (stdin_is_tty) {

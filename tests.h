@@ -25,6 +25,11 @@ typedef struct {
     int has_energy;
     double mwh;
     double mah;
+    int has_comment;
+    char comment[256]; /* user-supplied note about this test run, e.g. from
+                           the TUI's 'e'-triggered prompt or the headless
+                           CLI's --comment flag; empty/has_comment=0 if
+                           none was given. */
     char *csv_path;         /* malloc'd, NULL if none -- caller frees */
     char *sysinfo_csv_path; /* malloc'd, NULL if none -- caller frees */
     char *jsonl_path;       /* malloc'd, NULL if none -- caller frees */
@@ -43,9 +48,12 @@ void test_result_print_summary(const TestResult *r);
  * (if non-NULL) and letting samples accumulate in `sampler`'s ring
  * buffer, then drains and summarizes. Mirrors tests.py's
  * run_baseline_test(). Writes CSV/sysinfo-CSV/JSONL as a side effect.
- * `requested_duration_s` is logged in the JSONL record for reference. */
+ * `requested_duration_s` is logged in the JSONL record for reference.
+ * `comment` (may be NULL or empty) is copied into the result and JSONL
+ * record verbatim -- a one-off note about this specific run, e.g. from
+ * the headless CLI's --comment flag. */
 void run_baseline_test(Sampler *sampler, Ina3221 *dev, SysMonitor *sysmon, double duration_s,
-                       TestResult *out);
+                       const char *comment, TestResult *out);
 
 /* --- EnergyCapture: start/stop-triggered capture, mirrors tests.py's
  * EnergyCapture class. --- */
@@ -57,11 +65,21 @@ typedef struct {
     SampleList samples;
     SysRecorder sys_rec;
     int has_sys_rec;
+    int has_comment;
+    char comment[256]; /* set at energy_capture_start() time, consumed by
+                           the matching energy_capture_stop()'s TestResult
+                           -- callers are expected to supply a fresh
+                           comment (or NULL) each time a capture starts,
+                           since there's no other lifecycle hook to clear
+                           it "after one use". */
 } EnergyCapture;
 
 void energy_capture_init(EnergyCapture *ec, Sampler *sampler, Ina3221 *dev, SysMonitor *sysmon);
 void energy_capture_free(EnergyCapture *ec);
-void energy_capture_start(EnergyCapture *ec);
+/* `comment` (may be NULL or empty) is attached to whatever TestResult
+ * the *next* energy_capture_stop() call on this EnergyCapture produces --
+ * see the field comment above. */
+void energy_capture_start(EnergyCapture *ec, const char *comment);
 /* Call periodically while active to drain the sampler and poll sysinfo
  * (keeps the sampler's ring buffer from overflowing on a long capture). */
 void energy_capture_poll(EnergyCapture *ec);

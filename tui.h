@@ -5,9 +5,12 @@
  * section for the design rationale (raw ANSI + hand-rolled diffing
  * instead of ncurses/Cython).
  *
- * Keybindings (same as the old Python TUI):
+ * Keybindings:
  *   b       Run a baseline (idle) power test (10s).
- *   e       Arm the energy-usage test; SPACE starts/stops capturing.
+ *   e       Prompt for an optional one-line comment, then arm the
+ *           energy-usage test; SPACE starts/stops capturing. The
+ *           comment (if any) is attached to that one energy-test
+ *           result only and cleared afterward.
  *   space   Start/stop the energy capture.
  *   r       Reset the rolling sparkline history.
  *   q       Quit.

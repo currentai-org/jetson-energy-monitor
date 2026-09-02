@@ -29,6 +29,9 @@ typedef struct {
     int has_energy;
     double mwh;
     double mah;
+    int has_comment;
+    const char *comment; /* user-supplied note about this test run, or
+                             NULL/ignored if has_comment is 0 */
     const char *csv_path; /* NULL if none */
 
     double sampler_target_hz;

@@ -124,6 +124,12 @@ char *append_result_jsonl(const JsonlRecordInput *in) {
         json_field_null(f, "mah", &first);
     }
 
+    if (in->has_comment && in->comment && in->comment[0]) {
+        json_field_str(f, "comment", in->comment, &first);
+    } else {
+        json_field_null(f, "comment", &first);
+    }
+
     json_field_str(f, "csv_path", in->csv_path, &first);
 
     json_field_num(f, "sampler_target_hz", in->sampler_target_hz, &first);
