@@ -68,12 +68,34 @@ size_t sparkline_render(const SparklineHistory *h, int width, char *out, size_t 
         int idx = (start + i) % SPARKLINE_HISTORY;
         double v = h->values[idx];
         int level;
+        int render_blank = 0;
         if (range <= 0.0) {
-            level = 3; /* flat series: render at a mid-level, not level 0 */
+            /* Flat series: render at a mid-level UNLESS the flat value
+             * itself is exactly zero (e.g. GPU load pinned at 0.0% for
+             * the whole visible history) -- in that case fully blank is
+             * the correct, unambiguous representation. Without this
+             * check, a flat-zero series would render a solid low-level
+             * block instead of appearing genuinely idle -- see
+             * sparkline_render_rows()'s identical special case (this is
+             * the same fix, applied to the single-row renderer for
+             * consistency, though the TUI itself only calls the
+             * row-stacked renderers). A flat NONzero series (e.g.
+             * pinned at 50%) still gets the mid-level treatment so it
+             * stays visually distinct from "no data". */
+            if (lo == 0.0) {
+                render_blank = 1;
+            } else {
+                level = 3;
+            }
         } else {
             level = (int)(((v - lo) / range) * 7.0 + 0.5);
             if (level < 0) level = 0;
             if (level > 7) level = 7;
+        }
+        if (render_blank) {
+            if (pos + 1 >= out_cap) break;
+            out[pos++] = ' ';
+            continue;
         }
         const char *glyph = LEVELS[level];
         size_t glyph_len = 3;
@@ -147,7 +169,10 @@ void sparkline_render_rows(const SparklineHistory *h, int width, int n_rows, cha
         int level; /* 0..total_levels, "how many eighth-rows are filled
                        from the bottom up" */
         if (range <= 0.0) {
-            level = total_levels / 2; /* flat series: mid-height, not empty */
+            /* Flat series: mid-height UNLESS flat-at-zero, in which case
+             * fully empty is correct -- see sparkline_render()'s comment
+             * on the same special case for the full rationale. */
+            level = (lo == 0.0) ? 0 : total_levels / 2;
         } else {
             level = (int)(((v - lo) / range) * total_levels + 0.5);
             if (level < 0) level = 0;
@@ -269,7 +294,9 @@ void sparkline_render_rows_color(const SparklineHistory *h, int width, int n_row
         double v = h->values[idx];
         int level;
         if (range <= 0.0) {
-            level = total_levels / 2;
+            /* Flat series: mid-height UNLESS flat-at-zero -- see
+             * sparkline_render()'s comment for the full rationale. */
+            level = (lo == 0.0) ? 0 : total_levels / 2;
         } else {
             level = (int)(((v - lo) / range) * total_levels + 0.5);
             if (level < 0) level = 0;
@@ -324,9 +351,12 @@ void sparkline_render_rows_color(const SparklineHistory *h, int width, int n_row
 
     /* Reset SGR state at the end of each row so the color doesn't bleed
      * into whatever screen.c prints after the sparkline (row/col
-     * indicators etc. are plain, unstyled text). */
+     * indicators etc. are plain, unstyled text). Skipped for a row that
+     * never emitted any color escape (e.g. an all-blank row from a
+     * flat-at-zero series) -- nothing to reset, and it keeps a genuinely
+     * empty row's output genuinely empty (no stray reset bytes). */
     for (int r = 0; r < n_rows; r++) {
-        if (pos[r] + 4 < out_cap) {
+        if (last_level_bucket[r] != -1 && pos[r] + 4 < out_cap) {
             memcpy(out_rows[r] + pos[r], "\x1b[0m", 4);
             pos[r] += 4;
         }
