@@ -4,5 +4,6 @@ __pycache__/
 .uv_cache/
 *.egg-info/
 native/ina_bench
+native/jeu
 native/*.o
 native/*.csv
