@@ -1,20 +1,16 @@
 /*
- * main.c -- Jetson Energy Usage CLI (pure C), reimplementing exactly the
- * workflow of src/app.py's --headless mode: baseline test (waits
- * --duration seconds collecting current, then prints/logs results) and
- * energy test (starts capturing immediately, stops on any keypress or
- * Ctrl-C, then prints/logs results). No TUI -- this binary has no
- * interactive display beyond the same one-line "started..." message and
- * final human-readable summary the Python --headless mode prints.
+ * main.c -- Jetson Energy Usage CLI/TUI (jeu). CLI argument parsing and
+ * mode dispatch: `tui` (interactive, default), `baseline` (waits
+ * --duration seconds collecting current, then prints/logs results), and
+ * `energy` (starts capturing immediately, stops on any keypress or
+ * Ctrl-C, then prints/logs results).
  *
- * See ../README.md and README.md in this directory for the project
- * context and the ina_bench.c benchmark that motivated this rewrite.
+ * See README.md for usage and docs/DEVLOG.md for design history.
  *
  * Usage:
- *   jeu baseline [--hz N] [--duration SEC] [--channel NAME]
- *   jeu energy   [--hz N] [--channel NAME]
+ *   jeu [tui|baseline|energy] [--hz N] [--duration SEC] [--channel NAME]
  *
- * Build: see Makefile in this directory.
+ * Build: see Makefile.
  */
 #include <errno.h>
 #include <signal.h>
@@ -89,9 +85,8 @@ static void print_usage(const char *prog) {
             "[--color|--no-color]\n"
             "\n"
             "  tui                Interactive terminal UI with live sparklines (current/\n"
-            "                     CPU/GPU/temp) -- same keybindings as the old Python TUI\n"
-            "                     (b/e/space/r/q). This is the default when no test name\n"
-            "                     is given.\n"
+            "                     CPU/GPU/temp) -- keybindings b/e/space/r/q (see README).\n"
+            "                     This is the default when no test name is given.\n"
             "  baseline           Waits (idle) --duration seconds (default %.0f) collecting\n"
             "                     current samples, then prints/logs a results summary.\n"
             "  energy             Starts capturing immediately; press any key to stop\n"
@@ -104,9 +99,9 @@ static void print_usage(const char *prog) {
             "                     (default VDD_IN).\n"
             "  --sysinfo-hz N     Poll rate in Hz for CPU/GPU/RAM/swap/fan/temp (default %.0f).\n"
             "  --color            Force-enable truecolor sparkline gradients in 'tui' mode\n"
-            "                     (green->per-metric color, matching the old Python TUI).\n"
-            "                     On by default when stdout is a terminal and NO_COLOR/\n"
-            "                     TERM=dumb aren't set.\n"
+            "                     (green->per-metric color: current=yellow, cpu=cyan,\n"
+            "                     gpu=magenta, temp=red). On by default when stdout is a\n"
+            "                     terminal and NO_COLOR/TERM=dumb aren't set.\n"
             "  --no-color         Disable sparkline colors -- plain glyphs only. Use this if\n"
             "                     your terminal/multiplexer doesn't render truecolor (24-bit\n"
             "                     RGB) escape codes well; falls back to a lower-fidelity but\n"

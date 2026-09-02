@@ -16,7 +16,9 @@
 #include "term.h"
 #include "tests.h"
 
-#define UI_REFRESH_HZ 5.0    /* matches the old Python TUI's tick rate */
+#define UI_REFRESH_HZ 5.0    /* deliberately modest -- this is a "rough
+                                 picture" tool, not an oscilloscope; a
+                                 higher rate mostly burns CPU on redraws */
 #define VOLTAGE_POLL_HZ 1.0  /* throttled bus-voltage read, same rationale
                                  as sampler.py's dev_last_voltage() */
 #define LOG_MAX_LINES 200

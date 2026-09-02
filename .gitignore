@@ -1,9 +1,4 @@
-.venv/
-__pycache__/
-*.pyc
-.uv_cache/
-*.egg-info/
-native/ina_bench
-native/jeu
-native/*.o
-native/*.csv
+*.o
+/jeu
+/ina_bench
+*.csv

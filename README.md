@@ -1,404 +1,207 @@
-# Jetson Energy Usage
+# Jetson Energy Usage (`jeu`)
 
-A Python TUI for running energy-efficiency tests on the NVIDIA Jetson Orin
-Nano Developer Kit, using its **onboard INA3221** current/voltage monitor
-(I2C address `0x40`, bus 1) — no external hardware required.
+A lightweight terminal tool for running energy-efficiency tests on NVIDIA
+Jetson boards, using the onboard **INA3221** current/voltage monitor (I2C
+address `0x40`, bus 1) — no external hardware, no root required. Written in
+pure C with no runtime dependencies beyond the C standard library, `libm`,
+and `libpthread`.
+
+It has two faces:
+
+- **`jeu tui`** — an interactive terminal UI with live current/CPU/GPU/
+  die-temp sparklines, meant for watching a test run in real time.
+- **`jeu baseline`** / **`jeu energy`** — a minimal, no-TUI CLI mode meant
+  to run *alongside* your own application with the smallest possible CPU
+  footprint (see [Performance](#performance) below).
+
+Both modes write the same CSV / JSON-lines log files, so you can start in
+`tui` mode to sanity-check your setup, then switch to headless `baseline`/
+`energy` runs for actual measurements without disturbing the thing you're
+trying to measure.
 
 ## Why direct register access instead of the kernel `hwmon` driver?
 
 The stock L4T kernel driver exposes the INA3221 via
-`/sys/bus/i2c/drivers/ina3221/1-0040/hwmon/hwmon1/`, but on this board it's
-configured to round-robin all 3 channels with a slow bus-voltage conversion
-time (~4.156 ms), giving an aggregate update rate of only ~77 Hz — and the
-config isn't writable without root (`samples` / conversion-time attributes
-are root-owned).
+`/sys/bus/i2c/drivers/ina3221/1-0040/hwmon/hwmon1/`, but on the reference
+hardware it's configured to round-robin all 3 channels with a slow
+bus-voltage conversion time (~4.156 ms), giving an aggregate update rate of
+only ~77 Hz — and the config isn't writable without root (`samples` /
+conversion-time attributes are root-owned).
 
-Instead, `src/ina3221.py` talks to the chip directly over `/dev/i2c-1` via
-`smbus2`, reconfiguring it for single-channel (VDD_IN / total board input
-power), minimum conversion time (140 µs), no on-chip averaging. This needs
-no `sudo` — the `ubuntu` user is already in the `i2c` group, which owns
-`/dev/i2c-1`.
-
-Measured on `pocket-infer-6a8f` (Orin Nano Super):
-- Single-channel shunt-voltage-only reads: **~1620 Hz** sustained (617 µs/read)
-- Comfortably clears the 1 kHz target with headroom for jitter.
+Instead, `jeu` talks to the chip directly over `/dev/i2c-1`, reconfiguring
+it for single-channel (VDD_IN / total board input power by default),
+minimum conversion time (140 µs), no on-chip averaging. This needs no
+`sudo` as long as your user is in the `i2c` group (see [Setup](#setup)).
+Measured sustained single-channel rate on the reference hardware: **~1620
+Hz** (617 µs/read) — comfortably clears the 1 kHz default target with
+headroom for jitter.
 
 The original chip configuration is snapshotted on startup and restored on
-exit (best-effort — see `INA3221.restore_config()`), so other tools reading
-the standard hwmon path (e.g. `jtop`/`tegrastats`) return to their prior
-behavior after this tool exits.
+exit (best-effort), so other tools reading the standard hwmon path (e.g.
+`jtop`/`tegrastats`) return to their prior behavior after `jeu` exits.
 
-## Architecture
+## Setup
 
-- **`src/ina3221.py`** — raw INA3221 register driver (config word encode/decode,
-  shunt/bus voltage register reads, single-channel fast-mode helper).
-- **`src/sampler.py`** — dedicated background thread pulling current readings
-  at a target rate (default 1000 Hz) into a bounded ring buffer. Uses
-  `time.perf_counter()` for all timing, a hybrid sleep/spin wait to minimize
-  jitter on a non-RT kernel, and tracks achieved rate / jitter stats. The
-  sampling loop never blocks on UI/consumer code.
-- **`src/tests.py`** — test logic built on the sampler:
-  - `run_baseline_test`: averages current over a fixed window (default 10s).
-  - `EnergyCapture`: start/stop-triggered capture; integrates current over
-    time via the trapezoidal rule to compute mAh/mWh consumed.
-- **`src/csv_log.py`** — every test run's raw per-sample data (elapsed time,
-  instantaneous current, estimated instantaneous power) is written to a
-  timestamped CSV in the user cache directory (`$XDG_CACHE_HOME/jetson-energy-usage`,
-  falling back to `~/.cache/jetson-energy-usage`) so runs can be reviewed or
-  replotted later. Filenames: `YYYYMMDD_HHMMSS_<baseline|energy>.csv`. The
-  written path is echoed in the TUI's result log and in `TestResult.csv_path`.
-  A second, paired CSV -- `YYYYMMDD_HHMMSS_<baseline|energy>_sysinfo.csv` --
-  captures one row per system-resource snapshot taken during the same test
-  window (CPU%, GPU%, RAM/swap used+total+%, fan RPM/duty, die temp); see
-  `write_sysinfo_csv`. Written only if system monitoring is available for
-  that run (`TestResult.sysinfo_csv_path` is `None` otherwise).
-- **`src/jsonl_log.py`** — every test run also appends one JSON object (one
-  line) to a single running log, `results.jsonl`, in the same cache
-  directory. One `b` invocation writes exactly one line; one complete `e`
-  start/stop capture writes exactly one line. Different test types can
-  carry different fields (e.g. only the energy test has `mwh`/`mah`; only
-  the baseline test has `requested_duration_s`) -- consumers should key off
-  `test_type` rather than assuming a fixed schema. Each record also carries
-  sampler jitter/rate stats, device config (channel, shunt resistance, I2C
-  address), and -- when system monitoring is available -- `sys_avg_/sys_min_/
-  sys_max_<field>` summary stats (CPU%, GPU%, RAM%, swap%, fan RPM, die
-  temp) aggregated over the test window, plus `sys_n_samples` and
-  `sysinfo_csv_path`. Built via `tests._log_result_jsonl()`, called from
-  both `run_baseline_test` and `EnergyCapture.stop`.
-- **`src/app.py`** — the Textual TUI: a status bar (latest reading, achieved
-  sample rate, jitter), a system-resource status bar (CPU, GPU, RAM, swap,
-  fan, die temperature), three single-row unicode-block sparklines (current
-  mA, CPU%, GPU%) in the jtop/jetson-stats visual style, a scrolling
-  test-result log, and keybindings. UI refresh rate is a deliberately
-  modest 5 Hz -- this is a "rough picture" tool, not an oscilloscope, and a
-  higher refresh rate mostly just burns CPU on redraws without adding real
-  information (the current-sampling rate for tests/CSVs/JSONL is completely
-  independent of and unaffected by the UI refresh rate).
-- **`src/sysinfo.py`** — background thread polling `jetson-stats` (jtop) at
-  2 Hz for CPU load (aggregate + per-core), GPU load, RAM/swap usage, fan
-  RPM/duty, and die temperature (thermal-junction zone). Runs independently
-  of the INA3221 sampler so a slow/stalled jtop connection can never add
-  jitter to current sampling. Degrades gracefully (`SysSnapshot(ok=False)`)
-  if the jtop service isn't reachable or the client library version
-  mismatches the running service. Also provides `SysRecorder`, which
-  collects a de-duplicated snapshot series during a test window and
-  produces avg/min/max summary stats (`summary_stats()`) for the JSONL log.
+Requires `gcc`, `make`, and your user in the `i2c` group (no `sudo` needed
+for actually running the tool):
 
-## Keybindings
+```bash
+groups   # should list "i2c" -- if not, `sudo usermod -aG i2c $USER` and re-login
+git clone <this-repo> jeu && cd jeu
+make
+./jeu tui
+```
 
-| Key     | Action                                                              |
-|---------|----------------------------------------------------------------------|
-| `b`     | Run a **baseline (idle) power test** — averages current over 10s.   |
-| `e`     | **Arm** the energy-usage test (informational; space works either way). |
+To install system-wide (installs to `/usr/local/bin` by default):
+
+```bash
+sudo make install PREFIX=/usr/local
+# uninstall:
+sudo make uninstall PREFIX=/usr/local
+```
+
+No package manager dependencies — just a C compiler and `make`.
+
+## Usage
+
+```
+usage: ./jeu [tui|baseline|energy] [--hz N] [--duration SEC] [--channel NAME]
+             [--color|--no-color]
+
+  tui                Interactive terminal UI with live sparklines (current/
+                     CPU/GPU/temp) -- keybindings b/e/space/r/q (see below).
+                     This is the default when no test name is given.
+  baseline           Waits (idle) --duration seconds (default 10) collecting
+                     current samples, then prints/logs a results summary.
+  energy             Starts capturing immediately; press any key to stop
+                     (falls back to Ctrl-C if stdin isn't an interactive
+                     terminal), then prints/logs a results summary.
+  --hz N             Target INA3221 current sampling rate in Hz (default 1000).
+  --duration SEC     Duration in seconds for 'baseline' (default 10). Ignored
+                     for 'energy'/'tui'.
+  --channel NAME     INA3221 rail to sample: VDD_IN, VDD_CPU_GPU, or VDD_SOC
+                     (default VDD_IN).
+  --sysinfo-hz N     Poll rate in Hz for CPU/GPU/RAM/swap/fan/temp (default 2).
+  --color            Force-enable truecolor sparkline gradients in 'tui' mode.
+                     On by default when stdout is a terminal and NO_COLOR/
+                     TERM=dumb aren't set.
+  --no-color         Disable sparkline colors -- plain glyphs only. Use this
+                     if your terminal/multiplexer doesn't render truecolor
+                     (24-bit RGB) escape codes well.
+```
+
+### `tui` mode — keybindings
+
+| Key     | Action |
+|---------|--------|
+| `b`     | Run a **baseline (idle) power test** (10s, averages current). |
+| `e`     | **Arm** the energy-usage test (informational; `space` works either way). |
 | `space` | **Start/stop** an energy capture. On stop, integrates current × time (trapezoidal rule) over the window to report mWh / mAh consumed, plus mean/min/max current and achieved sample rate. |
-| `r`     | Clear the live chart.                                                |
-| `q`     | Quit (restores original INA3221 config).                            |
+| `r`     | Clear the live sparkline history. |
+| `q`     | Quit (restores original INA3221 config). |
 
-## Setup (on the Jetson)
+### `baseline` / `energy` — headless CLI mode
 
-```bash
-cd ~/jetson-energy-usage
-uv sync            # creates .venv, installs from pyproject.toml / uv.lock
-uv run python src/app.py
-```
-
-Or via the plain requirements file (if not using `uv`):
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python src/app.py
-```
-
-### Command-line flags
-
-```
-usage: jetson-energy-usage [-h] [--sample-hz HZ] [--sysinfo-hz HZ] [--channel NAME]
-                            [--no-plots] [--headless TEST] [--duration SECONDS]
-
-  --sample-hz HZ     Target INA3221 current sampling rate in Hz (default: 1000).
-                      Measured achievable rate on pocket-infer-6a8f is ~1600 Hz
-                      single-channel; requesting higher than the hardware/I2C bus
-                      can sustain shows up as reduced 'Rate' and increased jitter
-                      in the status bar rather than an error.
-  --sysinfo-hz HZ     Poll rate in Hz for CPU/GPU/RAM/swap/fan/temp via jetson-stats
-                      (jtop) (default: 2). jtop's own service publishes at roughly
-                      1 Hz internally, so requesting much faster than that adds
-                      polling overhead without more real data resolution.
-  --channel NAME      INA3221 rail to sample, by name: VDD_IN (total board input
-                      power), VDD_CPU_GPU (combined CPU+GPU+CV rail), or VDD_SOC
-                      (SoC rail). Default: VDD_IN. (Prior to 2026-08-31 this took
-                      a raw channel number 1/2/3; see ina3221.py's CHANNEL_NAMES
-                      for the underlying mapping if you need it.)
-  --no-plots          TUI mode only: disable the live current and CPU/GPU
-                      sparklines entirely. Status bars, keybindings, and
-                      CSV/JSONL logging are unaffected -- only the Sparkline
-                      widgets are skipped. Use this for the lowest possible
-                      TUI overhead. Ignored with --headless (see below).
-  --headless TEST     Run a single test with NO TUI at all -- no Textual
-                      import, no live sensor readouts on screen, just a short
-                      status line while the test runs and a human-readable
-                      summary at the end. TEST is 'baseline' or 'energy'.
-                      See "Headless CLI mode" below.
-  --duration SECONDS  Duration for '--headless baseline' (default: 10). Ignored
-                      for '--headless energy' (stops on keypress/Ctrl-C) and
-                      for the TUI (its 'b' keybinding is a fixed 10s).
-```
-
-Example: `uv run python src/app.py --sample-hz 500 --sysinfo-hz 1` for a
-lower-overhead run, or `uv run python src/app.py --no-plots` if the charts
-themselves are the bottleneck, or `uv run python src/app.py --channel
-VDD_CPU_GPU` to isolate the CPU+GPU rail instead of total board power.
-
-The status bar's "Channel:" field always shows which rail is currently
-being sampled, so it's clear at a glance even without checking how the app
-was launched.
-
-### Headless CLI mode (2026-09-02)
-
-For running alongside the user's own application with as little overhead
-as possible -- no TUI, no live sensor output, not even a Textual import --
-use `--headless baseline` or `--headless energy`:
+For running alongside your own application with the smallest possible
+overhead — no TUI, no live sensor output on screen at all:
 
 ```bash
 # Baseline: waits 10s (or --duration N) collecting idle current, then reports.
-uv run python src/app.py --headless baseline
-uv run python src/app.py --headless baseline --duration 30
+./jeu baseline --hz 1000 --duration 10 --channel VDD_IN
 
-# Energy: starts capturing immediately; press any key to stop and report.
-# (Falls back to Ctrl-C if stdin isn't an interactive terminal, e.g. when
-# run from a script with redirected/piped stdin.)
-uv run python src/app.py --headless energy
+# Energy: starts capturing immediately; press any key to stop and report
+# (falls back to Ctrl-C if stdin isn't an interactive terminal, e.g. run
+# from a script with redirected/piped stdin).
+./jeu energy --hz 1000 --channel VDD_IN
 ```
 
 Both modes print only a one-line "started, collecting..." status message
-before the test and the same human-readable summary the TUI's log widget
-shows after (mean current, min/max, bus voltage, mean power, energy for
-the energy test, CPU/GPU/temp avg/max, and the CSV/sysinfo-CSV/JSONL file
-paths) -- no sparklines, no periodic sensor printouts, no Rich/Textual
-rendering at all. The same `--sample-hz`/`--sysinfo-hz`/`--channel` flags
-apply. Output files (per-sample CSV, sysinfo CSV, and the shared
-`results.jsonl`) are identical in format to what the TUI produces --
-`--headless` only changes the front end, not what gets recorded.
+before the test, and a human-readable summary after (mean current, min/max,
+bus voltage, mean power, energy for the energy test, CPU/GPU/temp avg/max,
+and the CSV/JSONL file paths). No sparklines, no periodic sensor printouts.
 
-Implementation note: `run_tui()` and every Textual-specific class
-(StatusPanel/SysPanel/EnergyApp) live *inside* that function in `app.py`,
-not at module scope -- so `--headless` mode never imports `textual` at
-all, confirmed via `'textual' not in sys.modules` after a full headless
-test run. `run_headless()` reuses the exact same `Sampler`/`SysMonitor`/
-`run_baseline_test()`/`EnergyCapture` classes the TUI uses; only the
-front-end (what gets printed, and how the energy test's stop signal is
-delivered -- a keypress via a raw/cbreak terminal instead of a Textual
-keybinding) differs.
+## Output files
 
-No `sudo` needed as long as your user is in the `i2c` group:
+Every test run writes to `$XDG_CACHE_HOME/jetson-energy-usage` (falling
+back to `~/.cache/jetson-energy-usage`):
 
-```bash
-groups   # should list "i2c"
-```
+- **`YYYYMMDD_HHMMSS_<baseline|energy>.csv`** — raw per-sample data
+  (elapsed time, instantaneous current, estimated instantaneous power).
+- **`YYYYMMDD_HHMMSS_<baseline|energy>_sysinfo.csv`** — one row per
+  system-resource snapshot taken during the same test window (CPU%, GPU%,
+  RAM/swap used+total+%, fan RPM/duty, die temp).
+- **`results.jsonl`** — one JSON object per line, appended across every
+  test run ever performed (one `baseline` run or one complete `energy`
+  start/stop cycle = one line). Different test types carry different
+  fields (e.g. only `energy` has `mwh`/`mah`) — key off `test_type` rather
+  than assuming a fixed schema. Each record also carries sampler
+  jitter/rate stats, device config (channel, shunt resistance, I2C
+  address), and system-resource summary stats over the test window.
 
-## Performance history
+## Performance
 
-An earlier version of this project used `textual-plotext` for the live
-current/CPU/GPU charts. Two issues caused the UI to peg a CPU core and
-effectively hang after ~15s of runtime:
+`jeu` was rewritten from an earlier Python/Textual prototype specifically
+to minimize CPU footprint, since the intended use case is running
+*alongside* the user's own application on a resource-constrained device.
+Measured via `wait4()`/`getrusage()` (total process CPU time = `ru_utime +
+ru_stime`), 1000 Hz target, 10s runs, otherwise-idle device:
 
-1. **`Sampler.peek_recent(n)` was silently O(buffer size), not O(n).** It
-   rebuilt a whole new `collections.deque(self._buf, maxlen=n)` from the
-   source buffer on every call. Since the sample buffer isn't drained while
-   idle (only tests drain it), it grows continuously (up to a 200k-sample
-   cap at ~1kHz, ~200s of idle running), so a UI polling this 12x/sec at
-   `n=15000` became dramatically slower over time. Fixed in `sampler.py` by
-   walking only the needed elements via `itertools.islice(reversed(buf), n)`
-   -- true O(n) regardless of how long the buffer has been accumulating.
-2. **plotext's per-frame rendering of thousands of high-resolution data
-   points** was expensive even after (1) was fixed. Replaced with Textual's
-   built-in `Sparkline` widget (single-row unicode block characters, the
-   same visual style jtop/jetson-stats uses) which renders in O(terminal
-   width) per frame regardless of how much history is fed to it, and only
-   ever retains a small fixed-length rolling window (`SPARKLINE_HISTORY`,
-   120 points by default). `textual-plotext`/`plotext` are no longer
-   dependencies.
-3. **UI refresh rate reduced from 12 Hz to 5 Hz** by default -- this is a
-   "rough picture" tool, not an oscilloscope, and the higher rate mostly
-   burned CPU on redraws without adding real information (test data is
-   still captured at the full sampler rate regardless of UI refresh rate).
+| mode                          | total CPU time / 10s run | ~% of one core |
+|--------------------------------|---------------------------|-----------------|
+| `jeu baseline`                 | ~0.585-0.591 s             | **~5.8%**       |
+| `jeu tui` (full sparkline UI)   | ~0.617 s                   | **~6.2%**       |
 
-If you still see high CPU usage after these fixes, note that a good chunk
-of it is inherent to sustaining 1kHz I2C polling in Python on a non-RT
-kernel (measured ~45-50% of one core for the sampler+sysmon threads alone,
-independent of the UI) -- use `--sample-hz` to reduce the target rate, or
-`--no-plots` to shave off the remaining sparkline overhead, if you need to
-free up more CPU headroom.
-
-## Achieved-rate lag fix (2026-08-31)
-
-Independent of the CPU-usage fixes above, the **achieved sampling rate**
-(shown in the status bar's "Rate:" field) used to consistently lag the
-requested `--sample-hz` by 10-20%, even at low, easily-achievable rates
-like 100Hz -- e.g. `--sample-hz 100` might show ~94-97Hz in practice. Root
-cause: **CPython's default GIL switch interval is 5ms**
-(`sys.getswitchinterval()`). When the Textual UI thread is CPU-busy
-(rendering widgets, even simple ones), the interpreter only reconsiders
-handing the GIL to the waiting sampler thread roughly every 5ms -- coarser
-than the 1ms period needed for 1kHz sampling, and enough to compound into
-a double-digit-percent shortfall at any target rate once a starved thread
-has to catch up on missed periods.
-
-Fix: `src/sampler.py` calls `sys.setswitchinterval(0.0001)` (100us) at
-import time -- a process-wide interpreter setting, harmless to set
-repeatedly, with negligible overhead compared to the accuracy gained.
-Verified on `pocket-infer-6a8f`: achieved rate now matches target almost
-exactly at 100/200/500/1000 Hz, both with `--no-plots` and with the full
-sparkline UI active (998-1000Hz achieved at a 1000Hz target either way).
-
-Note: this device is a **shared, multi-user Jetson** -- other users'
-workloads (observed: an unrelated `llama-mtmd-cli` inference job) can and
-will steal real CPU time from the sampler thread regardless of any
-in-process fix. If you see achieved-rate lag that doesn't match the
-pattern above, check `uptime`/`ps aux --sort=-%cpu` for competing load
-before assuming it's a code regression.
-
-## CPU-footprint reduction pass (2026-08-31)
-
-The user's application shares this device with the sampler, so further
-reducing the sampler's own CPU cost (beyond the achieved-rate fix above)
-matters independent of accuracy. Four changes landed from a broader
-options/effort tradeoff analysis (see `.hermes/plans/` for the full
-options list, including options deferred for later):
-
-1. **Absolute-deadline sleep via `clock_nanosleep(CLOCK_MONOTONIC,
-   TIMER_ABSTIME, ...)`** (through `ctypes`, no new dependency) replaces the
-   previous relative `time.sleep()` in the sampler's wait loop. The old
-   design had to keep a large busy-spin window (500us) before each sample
-   deadline because a relative sleep's real-world wake-up precision on this
-   non-RT kernel was too imprecise to trust for anything shorter -- most of
-   the sampler's CPU cost was this unproductive spin, not the actual I2C
-   read. An absolute monotonic-clock deadline sleeps far more precisely, so
-   the spin window shrank to 50us. Falls back to the original
-   `time.sleep()`-based spin loop (larger threshold) if `clock_nanosleep`
-   isn't available on the platform (e.g. non-Linux dev environment) --
-   `sampler.py`'s `_load_clock_nanosleep()` probes for it at import time.
-2. **Preallocated ring buffer (`array.array('d', ...)` x2) replaces the
-   per-sample `Sample` dataclass + `collections.deque`** in the hot sampling
-   loop. At 1kHz that removed ~1000 small-object heap allocations/sec from
-   the producer thread; `Sample` objects are now only constructed on the
-   consumer side (`drain()`/`peek_recent()`, called at UI-tick or
-   end-of-test frequency, not per-sample). `drain()`/`peek_recent()` keep
-   their original list-of-`Sample` return type, so `tests.py`, `csv_log.py`,
-   and `app.py` needed no changes.
-3. **Bus-voltage read on the UI thread throttled from every tick (5Hz) to
-   `VOLTAGE_POLL_HZ` (1Hz default)**, with the cached value returned in
-   between. This was a second blocking I2C transaction competing for the
-   GIL against the sampler thread on every UI tick, for a value (bus
-   voltage on a stiff supply) that doesn't meaningfully change 5x/sec.
-4. **Shrunk the spin-to-sleep threshold in the sampler's wait loop** (see
-   item 1) -- listed separately in the original options list but landed
-   together with the `clock_nanosleep` change since they're two views of
-   the same fix (better sleep precision enables a smaller spin window).
-
-**Measured impact** (pocket-infer-6a8f, `/proc/<pid>/stat` utime+stime
-delta over a 15s window, device otherwise idle -- always check
-`uptime`/`ps aux --sort=-%cpu` before trusting a CPU measurement on this
-shared device):
-
-| target_hz | `--no-plots` before | `--no-plots` after | full sparkline UI after |
-|-----------|---------------------|---------------------|--------------------------|
-| 1000      | ~52-55%             | **25.2%**           | 51.8%                    |
-| 500       | (not separately measured pre-fix) | 19.4% | 41.9%                    |
-| 200       | (not separately measured pre-fix) | 12.8% | 38.9%                    |
-| 100       | (not separately measured pre-fix) | 13.7% | 36.8%                    |
-
-Roughly a **2x reduction** in `--no-plots` mode at 1kHz. With the full
-sparkline UI the improvement is smaller in relative terms -- Sparkline
-widget rendering is now the dominant remaining cost rather than the
-sampler loop itself. That's tracked as a deferred option (dirty-check
-guard before reassigning `.data`/calling `.update()` when a value hasn't
-meaningfully changed since the last tick) in the CPU-reduction options
-plan, not yet implemented.
-
-Achieved rate was re-verified at all four target rates after this change
-and still matches target closely (see table above's "achieved" figures in
-the code's own diagnostic output); the full baseline-test/energy-capture/
-CSV/JSONL pipeline was also re-verified end-to-end against the new
-ring-buffer-based `Sampler` to confirm no behavior regression from the
-storage-format change.
-
-## CPU-load square-wave glitch fix (2026-08-31)
-
-Observed symptom: the "CPU:" sparkline/readout reliably alternated between
-a fixed value (e.g. always exactly 3.78%) and the real instantaneous
-reading, producing a clean square-wave pattern -- not present in current,
-die temp, or GPU load, which come from different code paths.
-
-Root cause (confirmed via raw `jtop` polling independent of this
-project's own threading/sampling code, ruling out a bug in our own
-`SysMonitor`): the `jtop` **system service** itself (root-owned, shared
-across every user of this device -- not something this project can or
-should patch) periodically calls `CPUService.reset_estimation()` on its
-internal `/proc/stat` delta tracker whenever its control queue goes
-briefly idle between client requests. The very next CPU reading after a
-reset computes its delta against an all-zero baseline instead of the
-real previous sample, which yields the *cumulative average utilization
-since boot* -- a value that looks suspiciously constant because it barely
-changes reading to reading -- instead of a true instantaneous reading.
-This glitch value was confirmed to appear on **every other** update (a
-strict 50% duty cycle), which is exactly why it presented as a clean
-square wave rather than occasional noisy outliers; a median-of-N smoothing
-filter cannot reject a value that dominates every small window like that.
-
-Fix: `sysinfo.py` gained `_ProcStatCpuReader`, which reads `/proc/stat`
-directly (the same file jtop's own CPU code parses internally) and keeps
-its own **private** per-`SysMonitor` delta-tracking state, so no other
-process/thread sharing the jtop service can ever reset it out from under
-us. GPU load, RAM/swap, fan, and temperature are unaffected by this bug
-and still come from `jtop` as before -- only the CPU percentage
-computation was replaced.
-
-Verified: raw before/after `jtop` polling confirmed the exact alternating
-pattern and its disappearance; 10+ minutes of live `SysMonitor` polling
-post-fix showed smooth, non-repeating CPU readings; a synthetic `dd`
-stress test confirmed the new reader still tracks real load correctly
-(idle ~1-2% -> ~34% under 2 fully-busy cores on this 6-core device ->
-back to idle); and the full Textual UI's `CPU:` field was confirmed to
-transition smoothly with no snap-back artifact.
+For context, the earlier Python prototype measured ~19.5% (headless) and
+~41.2% (full TUI) under the same methodology — see
+[`docs/DEVLOG.md`](docs/DEVLOG.md) for the full investigation, including
+why Cython/ncurses were considered and rejected in favor of a from-scratch
+C rewrite.
 
 ## Hardware notes
 
-- **jetson-stats version pinning:** this project pins `jetson-stats==4.3.2`
-  in `pyproject.toml` to match the `jtop` *system service* version already
-  running on `pocket-infer-6a8f` (from L4T's default install). jtop's
-  client/service protocol is version-checked and refuses to connect on a
-  mismatch. If you see `Mismatch version jtop service: [X] and client: [Y]`,
-  either pin the client version to match (`uv add jetson-stats==X`) or run
-  `sudo jtop --install-service` to upgrade the service to match the client
-  (the latter needs sudo and affects other users of the shared device --
-  prefer pinning the client).
-- Shunt resistor value assumed: **5 mΩ** (`shunt1_resistor` sysfs attribute
-  read back as 5000 µΩ on the reference device) — matches TI reference
-  design constant used by the kernel driver. If porting to a different
-  Jetson board/carrier, verify this against that board's schematic before
-  trusting absolute current values (the *rate* achieved is independent of
-  this constant, but mA/mWh accuracy is not).
-- Channel 1 (VDD_IN) = total board input power, i.e. everything downstream
-  of the barrel jack / USB-C PD input — this is what "energy efficiency of
-  the whole board" tests should use. Channels 2/3 (VDD_CPU_GPU_CV,
-  VDD_SOC) are available in `ina3221.py` if you want to isolate a rail
-  (note: only one channel can run at the ~1620 Hz single-channel rate at a
-  time; enabling multiple channels drops the aggregate rate proportionally).
+- **Shunt resistor**: assumed **5 mΩ**, matching the TI reference design
+  constant used by the kernel driver on the reference hardware. If
+  porting to a different Jetson board/carrier, verify this against that
+  board's schematic before trusting absolute current values (the achieved
+  sample *rate* is independent of this constant, but mA/mWh accuracy is
+  not) — see `ina3221.h`'s `SHUNT_OHMS` constant in `main.c`.
+- **Channel 1 (VDD_IN)** = total board input power, i.e. everything
+  downstream of the barrel jack / USB-C PD input — the default, and what
+  "energy efficiency of the whole board" tests should use. Channels 2/3
+  (`VDD_CPU_GPU`, `VDD_SOC`) are available via `--channel` if you want to
+  isolate a rail (note: only one channel runs at the ~1620 Hz
+  single-channel rate at a time; enabling multiple channels drops the
+  aggregate rate proportionally — not currently supported by this tool).
+- Developed and tested primarily on a Jetson Orin Nano Super running stock
+  L4T 36.5.0 (`5.15.185-tegra`). Achieved rate/jitter will vary on other
+  kernels or under heavy competing CPU load — `jeu tui`'s status bar
+  reports live jitter so you can judge data quality for a given run.
 
-## Known limitations / follow-ups
+## Architecture
 
-- Bus voltage is currently re-read once per UI tick (~12 Hz) rather than
-  every sample, since VDD_IN is a stiff supply and doesn't need 1kHz
-  resolution for the mWh integration to be accurate — if your supply is
-  noisy/sagging under load, consider sampling bus voltage synchronously
-  with current instead (see `Sampler._run`).
-- Not tested on non-RT kernels other than stock L4T 36.5.0 (`5.15.185-tegra`
-  on `pocket-infer-6a8f`). Achieved rate/jitter will vary on other kernels
-  or under heavy competing CPU load — the in-app status bar reports live
-  jitter so you can judge data quality for a given run.
-- This project is intentionally scoped to `pocket-infer-6a8f`'s Orin Nano
-  Super. Porting to another Jetson requires re-verifying the I2C address,
-  bus number, and shunt resistor value against that board's schematic.
+| File(s)            | Purpose |
+|---------------------|---------|
+| `ina3221.h/.c`       | Raw INA3221 register driver (config word encode/decode, shunt/bus voltage register reads, single-channel fast-mode helper). |
+| `sampler.h/.c`       | Background thread sampling current at a target rate into a preallocated ring buffer, using `clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, ...)` for absolute-deadline pacing to minimize jitter. |
+| `sysinfo.h/.c`       | Reads CPU/GPU/RAM/swap/fan/temp directly from `/proc` and `/sys` — no `jtop`/`jetson-stats` dependency. |
+| `sysmon.h/.c`        | Background poll thread wrapping `sysinfo.c`, plus a test-window sample recorder/summarizer. |
+| `csv_log.h/.c`       | Per-sample and per-test-window sysinfo CSV writers (buffered, batched I/O). |
+| `jsonl_log.h/.c`     | Hand-rolled minimal JSON writer appending to `results.jsonl`. |
+| `tests.h/.c`         | Baseline-test and start/stop `EnergyCapture` logic, including trapezoidal mWh/mAh integration. |
+| `term.h/.c`          | Raw/cbreak terminal mode, alternate screen buffer, cursor show/hide, terminal-size query. |
+| `sparkline.h/.c`     | Unicode block-glyph sparklines (8-level, optionally stacked across rows for more vertical resolution) with optional truecolor gradients. |
+| `screen.h/.c`        | Fixed-row, double-buffered terminal renderer — only repaints lines that actually changed since the last frame. |
+| `tui.h/.c`           | Interactive TUI application state, render loop, and keybindings. |
+| `main.c`             | CLI argument parsing and mode dispatch (`tui`/`baseline`/`energy`). |
+| `ina_bench.c`        | Standalone I2C-sampling benchmark used as a performance reference point during development — see `docs/DEVLOG.md`. Not part of the `jeu` binary; build with `make bench`. |
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for build/test conventions and
+[`docs/DEVLOG.md`](docs/DEVLOG.md) for the design history and rationale
+behind non-obvious choices (why C instead of Python, why raw ANSI instead
+of ncurses, etc.) — worth reading before making structural changes.
+
+## License
+
+[MIT](LICENSE).
