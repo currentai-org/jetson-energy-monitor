@@ -29,6 +29,7 @@
 #include "sampler.h"
 #include "sysmon.h"
 #include "tests.h"
+#include "tui.h"
 
 #define DEFAULT_SAMPLE_HZ 1000.0
 #define DEFAULT_SYSINFO_HZ 2.0
@@ -84,8 +85,12 @@ static int key_pressed(double timeout_s) {
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
-            "usage: %s baseline|energy [--hz N] [--duration SEC] [--channel NAME]\n"
+            "usage: %s [tui|baseline|energy] [--hz N] [--duration SEC] [--channel NAME]\n"
             "\n"
+            "  tui                Interactive terminal UI with live sparklines (current/\n"
+            "                     CPU/GPU/temp) -- same keybindings as the old Python TUI\n"
+            "                     (b/e/space/r/q). This is the default when no test name\n"
+            "                     is given.\n"
             "  baseline           Waits (idle) --duration seconds (default %.0f) collecting\n"
             "                     current samples, then prints/logs a results summary.\n"
             "  energy             Starts capturing immediately; press any key to stop\n"
@@ -93,7 +98,7 @@ static void print_usage(const char *prog) {
             "                     terminal), then prints/logs a results summary.\n"
             "  --hz N             Target INA3221 current sampling rate in Hz (default %.0f).\n"
             "  --duration SEC     Duration in seconds for 'baseline' (default %.0f). Ignored\n"
-            "                     for 'energy'.\n"
+            "                     for 'energy'/'tui'.\n"
             "  --channel NAME     INA3221 rail to sample: VDD_IN, VDD_CPU_GPU, or VDD_SOC\n"
             "                     (default VDD_IN).\n"
             "  --sysinfo-hz N     Poll rate in Hz for CPU/GPU/RAM/swap/fan/temp (default %.0f).\n",
@@ -101,17 +106,22 @@ static void print_usage(const char *prog) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2) {
-        print_usage(argv[0]);
-        return 1;
-    }
-    const char *test = argv[1];
-    if (strcmp(test, "baseline") != 0 && strcmp(test, "energy") != 0) {
-        if (strcmp(test, "--help") == 0 || strcmp(test, "-h") == 0) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
             return 0;
         }
-        fprintf(stderr, "unknown test %s; expected 'baseline' or 'energy'\n", test);
+    }
+
+    const char *test = "tui"; /* default: interactive TUI, no args needed */
+    int arg_start = 1;
+
+    if (argc >= 2 && argv[1][0] != '-') {
+        test = argv[1];
+        arg_start = 2;
+    }
+    if (strcmp(test, "tui") != 0 && strcmp(test, "baseline") != 0 && strcmp(test, "energy") != 0) {
+        fprintf(stderr, "unknown test %s; expected 'tui', 'baseline', or 'energy'\n", test);
         print_usage(argv[0]);
         return 1;
     }
@@ -121,7 +131,7 @@ int main(int argc, char **argv) {
     double duration_s = DEFAULT_DURATION_S;
     char channel_name_buf[32] = "VDD_IN";
 
-    for (int i = 2; i < argc; i++) {
+    for (int i = arg_start; i < argc; i++) {
         if (strcmp(argv[i], "--hz") == 0 && i + 1 < argc) {
             sample_hz = atof(argv[++i]);
         } else if (strcmp(argv[i], "--duration") == 0 && i + 1 < argc) {
@@ -178,6 +188,17 @@ int main(int argc, char **argv) {
     }
 
     const char *chan_label = ina3221_channel_name(channel);
+
+    if (strcmp(test, "tui") == 0) {
+        int rc = run_tui(&dev, &sampler, &sysmon, channel);
+        sysmon_stop(&sysmon);
+        sysmon_destroy(&sysmon);
+        sampler_stop(&sampler);
+        sampler_free(&sampler);
+        ina3221_restore_config(&dev);
+        ina3221_close(&dev);
+        return rc;
+    }
 
     TestResult result;
     if (strcmp(test, "baseline") == 0) {

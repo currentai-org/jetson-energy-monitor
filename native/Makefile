@@ -7,7 +7,8 @@ CC ?= gcc
 CFLAGS ?= -O2 -Wall -Wextra -std=gnu11
 LDFLAGS = -lm -lpthread
 
-SOURCES = main.c common.c ina3221.c sampler.c sysinfo.c sysmon.c csv_log.c jsonl_log.c tests.c
+SOURCES = main.c common.c ina3221.c sampler.c sysinfo.c sysmon.c csv_log.c jsonl_log.c tests.c \
+          term.c screen.c sparkline.c tui.c
 OBJECTS = $(SOURCES:.c=.o)
 TARGET = jeu
 

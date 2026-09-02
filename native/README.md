@@ -210,3 +210,84 @@ Prints the same human-readable summary format to stdout.
   spike identified, while also implementing the complete test workflow
   (not just raw sampling), giving the user a genuine low-overhead
   fallback option alongside the Python app.
+
+## TUI: raw ANSI + hand-rolled diffing, no ncurses/Cython (2026-09-02)
+
+Once `jeu`'s headless baseline/energy tests were validated, the user
+asked to bring back an interactive TUI with live sparklines (current/CPU/
+GPU/temp) -- the one thing the pure-CLI rewrite dropped -- while staying
+"as lean as possible" on CPU. Before implementing, three options were
+weighed:
+
+1. **Cython** -- wrap the C sampler and drive a Python-side render loop.
+   Rejected: this puts the *render loop* back under the GIL, which is
+   exactly what caused the original TUI's overhead (jitter from a busy
+   UI thread was the very first bug fixed in this project's history --
+   see `sampler.py`'s `sys.setswitchinterval` docstring). Also means
+   maintaining two toolchains/an FFI boundary for no benefit, since the
+   bottleneck this whole effort is chasing lives in the render loop, not
+   the sampler.
+2. **ncurses** -- terminfo-portable, handles resize/redraw diffing
+   automatically. Rejected: its main value (terminal-portability,
+   generic damage-tracking for an unknown/dynamic widget tree) doesn't
+   apply here -- the layout is fixed and known ahead of time (2 status
+   rows + 4 sparkline rows + a short log + a footer), so a hand-rolled
+   diff is just as effective and avoids a new library dependency
+   (`libncursesw` + terminfo database) for a benefit we don't need.
+3. **Raw ANSI + a small hand-rolled diffing renderer** -- chosen. Same
+   core idea ncurses/Textual use internally (only touch terminal cells
+   that actually changed since the last frame), implemented directly for
+   our fixed layout in a few hundred lines of C, no new dependencies.
+
+### New modules
+
+| File              | Purpose |
+|--------------------|---------|
+| `term.h/.c`        | Raw/cbreak terminal mode, alternate screen buffer, cursor show/hide, `ioctl(TIOCGWINSZ)` terminal-size query. |
+| `sparkline.h/.c`   | 8-level Unicode block-glyph sparklines (`▁▂▃▄▅▆▇█`, same codepoint range Textual's `Sparkline` and tools like `holman/spark` use) with per-render auto min/max scaling, matching the old TUI's visual fidelity. |
+| `screen.h/.c`      | Fixed-row double-buffered renderer: build a frame as an array of text lines, `screen_flush()` only emits ANSI cursor-position + clear-to-eol + text for lines that changed (byte-compare against the previous frame) -- the "damage diffing" ncurses/Textual do internally, hand-rolled for our known layout. Also truncates each line to the current terminal width in *display columns* (UTF-8-aware, so a 3-byte sparkline glyph counts as 1 column, not 3) so nothing wraps onto the next physical row and breaks the fixed-row assumption. |
+| `tui.h/.c`         | Application state + render loop + keybindings (`b`/`e`/space/`r`/`q`, same as the old Python TUI), 5Hz tick (matches the old `UI_REFRESH_HZ`), baseline test runs in its own pthread so the render loop never blocks on it (mirrors the old Textual `work`-decorated worker thread). |
+
+`main.c`'s dispatch now defaults to `tui` mode when no test name is
+given (`./jeu` with no args = TUI, same as before this change `./jeu`
+alone was an error) -- `baseline`/`energy` still work exactly as before.
+
+### Pitfall found + fixed
+
+Early testing showed status-line text wrapping onto the sparkline row
+below it, corrupting the display, because the Mode/Channel/Latest and
+CPU/GPU/RAM/Swap/Fan lines were wider than the test terminal (100
+columns) and the terminal itself wrapped the overflow onto the next
+physical row -- breaking the "one logical line = one physical row"
+assumption `screen.c`'s diffing renderer depends on. Fixed by having
+`screen_set_line()` truncate every line to the terminal's current width
+(via a new `screen_set_term_width()` call once per tick, UTF-8-aware so
+sparkline glyphs aren't split mid-byte).
+
+### Verification performed
+
+- Captured raw PTY output from a real `jeu tui` run and replayed it
+  through Python's `pyte` terminal emulator (temporarily added as a dev
+  dependency, then removed) to get a readable rendered-screen dump --
+  confirmed the status/sysinfo lines, all four sparklines, the log tail,
+  and the footer all render on their own distinct rows with no wrapping.
+- Scripted a full interaction sequence via PTY: start the TUI, press
+  `b` to run a 10s baseline test, confirm the "BASELINE RUNNING..." mode
+  text and sparklines update live during the test, confirm the completed
+  test's summary lines appear in the log tail afterward, press `r` to
+  reset sparkline history (confirmed a flat/near-empty sparkline
+  immediately after), then `q` to quit -- confirmed clean exit (code 0),
+  cursor restored, alternate screen buffer torn down (`\x1b[?25h`
+  `\x1b[?1049l` observed in the captured output).
+- CPU footprint (`wait4()`/`getrusage()`, 1000Hz, 10s PTY run): **`jeu
+  tui` measured ~0.617s total CPU time / 10s (~6.2%)** -- essentially
+  matching the pure `jeu baseline`/`ina_bench` floor (~5.4-5.9%), meaning
+  this renderer adds almost no CPU cost on top of sampling. For
+  reference, the old Python Textual TUI measured **~4.116s / 10s
+  (~41.2%)** under the same methodology -- the native TUI is roughly
+  **6.6x cheaper**.
+- Fixed a `--help`/`-h` argument-parsing regression introduced while
+  adding the `tui` test-name dispatch (the positional-arg detection was
+  short-circuiting before the `--help` check ran) -- caught by manual
+  testing, not by any automated test suite (none exists for this native
+  code yet).
