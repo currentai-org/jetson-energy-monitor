@@ -323,18 +323,21 @@ of the current/CPU/GPU/temp traces. Four approaches were considered:
    worth a follow-up if 16 levels (current 2-row scheme) still isn't
    enough detail**, since it's the more work-intensive option of the two
    viable choices.
-3. **ANSI 256-color foreground gradient on top of existing glyphs** -- a
-   genuinely free complementary technique: color the glyph based on
-   value (e.g. green/yellow/red thresholds, or a smooth gradient) using
-   `\x1b[38;5;Nm` before each glyph. Adds a second, continuous "channel"
-   of information (color intensity) on top of the existing 8/16-level
-   block height, at effectively zero CPU cost (a few extra bytes per
-   glyph in the same buffered write, no extra computation beyond a
-   threshold/gradient lookup already available from the value being
-   plotted anyway). **Not implemented** in this pass since it wasn't
-   explicitly asked for and changes the "plain block glyph" aesthetic,
-   but flagged here as the cheapest available option if more perceptual
-   depth is wanted without more rows.
+3. **ANSI 256-color foreground gradient on top of existing glyphs
+   (chosen, implemented 2026-09-02)** -- a genuinely free complementary
+   technique: color the glyph based on value (24-bit truecolor gradient
+   from green to a per-metric color, matching the old Python Textual
+   TUI's `#spark-current`/`#spark-cpu`/`#spark-gpu`/`#spark-temp` CSS)
+   using `\x1b[38;2;R;G;Bm` before each glyph. Adds a second, continuous
+   "channel" of information (color intensity) on top of the existing
+   8/16-level block height. Implemented in `sparkline_render_rows_color()`
+   (`sparkline.{h,c}`); wired into `tui.c`/`main.c` behind
+   `--color`/`--no-color`, on by default (auto-detects tty/`NO_COLOR`/
+   `TERM=dumb`). Confirmed effectively free via `wait4()`/`getrusage()`:
+   ~6.1% with color vs ~6.2% without, within noise -- achieved by only
+   emitting a new color escape when the value's color bucket actually
+   changes between adjacent glyphs in the same row (flat/idle stretches,
+   the common case, stay cheap).
 4. **Increasing SPARKLINE_HISTORY's time resolution (more UI ticks per
    sample) or the glyph width** -- these affect *horizontal* resolution
    (how much history is visible / how finely time is divided), not
