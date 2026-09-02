@@ -19,6 +19,12 @@ Both modes write the same CSV / JSON-lines log files, so you can start in
 `energy` runs for actual measurements without disturbing the thing you're
 trying to measure.
 
+## End-to-end demo:
+
+
+https://github.com/user-attachments/assets/efc348e9-568a-499c-a89e-c5fa5baaa9a7
+
+
 ## Why direct register access instead of the kernel `hwmon` driver?
 
 The stock L4T kernel driver exposes the INA3221 via
