@@ -25,6 +25,12 @@ trying to measure.
 https://github.com/user-attachments/assets/efc348e9-568a-499c-a89e-c5fa5baaa9a7
 
 
+## AI Disclosure
+
+This project was built with assistance from a Hermes agent using a blend of AI models. 
+- **Human Role:** Theory + Architecture, Manual validation on hardware, Performance testing, Data Validation
+- **AI Role ([Hermes](https://hermes-agent.nousresearch.com/)/[Claude](https://anthropic.com)):** Primary code generation, refactoring, and drafting documentation.
+
 ## Why direct register access instead of the kernel `hwmon` driver?
 
 The stock L4T kernel driver exposes the INA3221 via
